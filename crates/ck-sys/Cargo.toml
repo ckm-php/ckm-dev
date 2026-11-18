@@ -1,0 +1,23 @@
+[package]
+name = "ck-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tokio.workspace = true
+windows-sys.workspace = true
+
+# The only crate allowed `unsafe` (D22). A workspace `forbid` cannot be relaxed
+# per function (E0453), so this table mirrors the workspace lints with `deny`.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"

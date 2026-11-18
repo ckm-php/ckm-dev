@@ -9,9 +9,22 @@ publish.workspace = true
 name = "ck"
 path = "src/main.rs"
 
+# Dummy service for the integration tests. A [[bin]] so that cargo builds it
+# for the tests and sets CARGO_BIN_EXE_ck-test-service. It exits 2 in a release
+# build and is never shipped: packaging bundles `ck` only.
+[[bin]]
+name = "ck-test-service"
+path = "tests/support/test_service.rs"
+
 [dependencies]
 ck-core.workspace = true
 clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+ck-sys.workspace = true
 
 [lints]
 workspace = true
