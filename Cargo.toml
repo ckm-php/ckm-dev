@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/ck-core", "crates/ck-cli", "apps/desktop/src-tauri"]
+members = [
+  "crates/ck-sys",
+  "crates/ck-core",
+  "crates/ck-cli",
+  "apps/desktop/src-tauri",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,11 +15,37 @@ publish = false
 
 [workspace.dependencies]
 ck-core = { path = "crates/ck-core" }
+ck-sys = { path = "crates/ck-sys" }
 clap = { version = "4.6", features = ["derive"] }
+dirs = "7.0.0"
+libc = "0.2.191"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11.1"
 tauri = "2.12.6"
 tauri-build = "2.7.5"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting"] }
+tokio = { version = "1.54.1", features = [
+  "rt",
+  "net",
+  "io-util",
+  "time",
+  "process",
+  "signal",
+  "sync",
+  "macros",
+] }
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Pipes",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_Console",
+] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
