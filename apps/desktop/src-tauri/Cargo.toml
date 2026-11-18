@@ -7,7 +7,15 @@ publish = false
 
 [lib]
 name = "ck_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Windows test executables lack the app manifest tauri-build embeds only into bins,
+# so they fail to start. Re-enable with a test manifest once the crate has tests.
+test = false
+doctest = false
+
+[[bin]]
+name = "ck-desktop"
+path = "src/main.rs"
+test = false
 
 [build-dependencies]
 tauri-build = { workspace = true }

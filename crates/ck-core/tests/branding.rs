@@ -17,4 +17,11 @@ fn tauri_config_matches_branding() {
 
     assert_eq!(config["productName"], DISPLAY_NAME);
     assert_eq!(config["identifier"], APP_ID);
+
+    let windows = config["app"]["windows"].as_array().expect("app.windows");
+    let main = windows
+        .iter()
+        .find(|window| window["label"] == "main")
+        .expect("a window labelled main");
+    assert_eq!(main["title"], DISPLAY_NAME);
 }

@@ -15,9 +15,12 @@ export function App({ bridge, isMock }: AppProps) {
     let active = true;
     bridge.appInfo().then(
       (info) => {
-        if (active) setState({ kind: 'ready', info });
+        if (!active) return;
+        document.title = info.name;
+        setState({ kind: 'ready', info });
       },
-      () => {
+      (reason: unknown) => {
+        console.error('app_info failed', reason);
         if (active) setState({ kind: 'error' });
       },
     );
