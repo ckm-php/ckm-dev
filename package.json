@@ -1,0 +1,22 @@
+{
+  "name": "ckm-dev",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.6",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "format": "prettier --write .",
+    "check": "prettier --check . && eslint . && pnpm -C apps/desktop exec tsc --noEmit && pnpm -C apps/desktop exec vitest run",
+    "e2e": "pnpm -C apps/desktop e2e",
+    "tauri": "pnpm -C apps/desktop tauri"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.15.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "prettier": "^3.10.1",
+    "typescript-eslint": "^8.73.0"
+  }
+}

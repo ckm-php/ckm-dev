@@ -1,0 +1,17 @@
+[package]
+name = "ck-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ck"
+path = "src/main.rs"
+
+[dependencies]
+ck-core.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

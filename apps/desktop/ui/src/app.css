@@ -1,0 +1,57 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f7f7f8;
+  --fg: #1d1d1f;
+  --muted: #5f6368;
+  --error: #b3261e;
+  --mock-bg: #fff4ce;
+  --mock-fg: #5c4400;
+  font-family: system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e;
+    --fg: #f2f2f7;
+    --muted: #a1a1a6;
+    --error: #f2b8b5;
+    --mock-bg: #4a3b00;
+    --mock-fg: #ffe9a8;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.shell {
+  padding: 2rem;
+}
+
+.shell h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.75rem;
+}
+
+.muted {
+  margin: 0;
+  color: var(--muted);
+}
+
+.error {
+  margin: 0;
+  color: var(--error);
+}
+
+.mock-label {
+  display: inline-block;
+  margin: 0 0 1rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  background: var(--mock-bg);
+  color: var(--mock-fg);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}

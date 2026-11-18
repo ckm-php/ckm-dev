@@ -1,0 +1,10 @@
+.claude/
+docs/
+target/
+**/dist/
+apps/desktop/src-tauri/gen/
+node_modules/
+playwright-report/
+test-results/
+pnpm-lock.yaml
+Cargo.lock
