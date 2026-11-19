@@ -32,7 +32,7 @@ ck_pins_load() {
 # fields: name version url sha256 size license signature file. Dies when the
 # name is missing, appears twice, or its line is malformed.
 ck_pin() {
-  local want=${1:-} found= count=0 line name rest tab=$'\t'
+  local want=${1:-} found='' count=0 line name rest tab=$'\t'
   [ -n "$want" ] || ck_die "ck_pin: no name"
   [ -n "$CK_PINS" ] || ck_die "ck_pin $want: no pins loaded (call ck_pins_load first)"
   while IFS= read -r line; do
@@ -197,7 +197,7 @@ ck_fetch() {
 # an existing <dest> is always complete.
 ck_unpack() {
   [ "$#" -eq 2 ] || ck_die "ck_unpack: expected 2 arguments, got $#"
-  local archive=$1 dest=$2 parent listing member top= staging root real link target
+  local archive=$1 dest=$2 parent listing member top='' staging root real link target
   case "$archive" in
     *.tar.gz | *.tgz | *.tar.xz | *.tar.bz2) ;;
     *) ck_die "not a supported archive (.tar.gz, .tgz, .tar.xz, .tar.bz2): $archive" ;;

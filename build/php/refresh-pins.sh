@@ -121,13 +121,14 @@ ck_refresh_check_host() {
 # `<hex>  <name>`, `<hex> *<name>` and `SHA256 (<name>) = <hex>` lines,
 # after any leading blanks. Dies unless exactly one hash matches.
 ck_sumfile_hash() {
-  local sumfile=$1 want=$2 line hash name found= count=0 bare=0 ws=$' \t'
+  local sumfile=$1 want=$2 line hash name found='' count=0 bare=0 ws=$' \t'
   local hex_re='^[0-9A-Fa-f]{64}$'
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line%$'\r'}
+    # shellcheck disable=SC2295 # $ws is meant as a character class
     line=${line#"${line%%[!$ws]*}"}
     [ -n "$line" ] || continue
-    hash= name=
+    hash='' name=''
     case "$line" in
       'SHA256 ('*') = '*)
         name=${line#"SHA256 ("}
@@ -135,9 +136,11 @@ ck_sumfile_hash() {
         hash=${line##*") = "}
         ;;
       *)
+        # shellcheck disable=SC2295 # $ws is meant as a character class
         hash=${line%%[$ws]*}
         if [ "$hash" != "$line" ]; then
           name=${line#"$hash"}
+          # shellcheck disable=SC2295 # $ws is meant as a character class
           name=${name#"${name%%[!$ws]*}"}
           name=${name#\*}
         fi
@@ -163,7 +166,7 @@ ck_sumfile_hash() {
 # line in upper case. A line is a 40-hex-digit fingerprint, spaces allowed
 # inside it; `#` starts a comment. Dies on any other line or an empty list.
 ck_allowlist_load() {
-  local file=$1 line fpr out= re='^[0-9A-F]{40}$'
+  local file=$1 line fpr out='' re='^[0-9A-F]{40}$'
   [ -f "$file" ] || ck_die "missing fingerprint allow-list: $file"
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line%%#*}
@@ -284,7 +287,7 @@ ck_refresh_main() {
     ck_die "refresh-pins.sh does not run in CI: a person refreshes pins and reviews the lock diff"
   fi
   [ "$#" -ge 2 ] || ck_refresh_usage
-  local name=$1 version=$2 url= work file sha size license kind=none
+  local name=$1 version=$2 url='' work file sha size license kind=none
   local checked=() fpr expected
   shift 2
   while [ "$#" -gt 0 ]; do

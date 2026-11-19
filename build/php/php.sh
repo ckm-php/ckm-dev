@@ -60,8 +60,8 @@ ck_php_line_load() {
   ck_check_line "$line"
   info=$(ck_release lock line "$line") || ck_die "ck-release lock line $line failed"
   [ -n "$info" ] || ck_die "ck-release lock line $line printed nothing"
-  CK_PHP_LINE= CK_PHP_VERSION= CK_PHP_RELEASE= CK_PHP_REVISION= CK_PHP_STACK=
-  CK_PHP_LICENSE= CK_PHP_BUILTIN= CK_PHP_DEFAULT= CK_PHP_OPTIONAL=
+  CK_PHP_LINE='' CK_PHP_VERSION='' CK_PHP_RELEASE='' CK_PHP_REVISION='' CK_PHP_STACK=''
+  CK_PHP_LICENSE='' CK_PHP_BUILTIN='' CK_PHP_DEFAULT='' CK_PHP_OPTIONAL=''
   while IFS=$'\t' read -r key value; do
     case "$key" in
       line) CK_PHP_LINE=$value ;;
@@ -107,8 +107,11 @@ ck_php_stack_load() {
   done <<<"$CK_PHP_STACK_PINS"
   pin=$(ck_pin cacert) || exit 1
   IFS=$'\t' read -r name version url sha size license _ file <<<"$pin"
+  # shellcheck disable=SC2034 # read by relocate.sh
   CK_PHP_CACERT=$(ck_fetch "$name" "$version" "$url" "$sha" "$size" "$file") || exit 1
+  # shellcheck disable=SC2034 # read by relocate.sh
   CK_PHP_CACERT_VERSION=$version
+  # shellcheck disable=SC2034 # read by relocate.sh
   CK_PHP_CACERT_LICENSE=$license
 }
 
@@ -116,7 +119,7 @@ ck_php_stack_load() {
 # builds the extension that way, or nothing when the line always builds it
 # in. Dies for a name or class it does not know.
 ck_php_ext_flag() {
-  local name=$1 class=$2 shared= opt=${1//_/-} major=${CK_PHP_LINE%%.*}
+  local name=$1 class=$2 shared='' opt=${1//_/-} major=${CK_PHP_LINE%%.*}
   case "$class" in
     builtin) ;;
     shared) shared=shared ;;
@@ -272,6 +275,7 @@ ck_php_build() {
   pin=$(ck_pin php) || exit 1
   IFS=$'\t' read -r name version url sha size _ _ file <<<"$pin"
   [ "$version" = "$CK_PHP_VERSION" ] || ck_die "php: the line's pin is $version, lock line said $CK_PHP_VERSION"
+  # shellcheck disable=SC2034 # read by relocate.sh
   CK_PHP_SOURCE_SHA256=$sha
   archive=$(ck_fetch "$name" "$version" "$url" "$sha" "$size" "$file") || exit 1
 
@@ -286,6 +290,7 @@ ck_php_build() {
 
   ck_php_configure_args "$line"
   cflags=$(ck_php_line_cflags "$line")
+  # shellcheck disable=SC2153 # LDFLAGS comes from ck_platform_env
   ldflags=$LDFLAGS
   if [ "$os" = linux ]; then
     # Drops any library nothing uses, such as a libcrypt that configure
@@ -294,6 +299,7 @@ ck_php_build() {
   fi
   jobs=$(ck_jobs)
   # configure records CFLAGS and LDFLAGS in the Makefile.
+  # shellcheck disable=SC2153 # CFLAGS and LDFLAGS come from ck_platform_env
   ck_php_run "$src" env CFLAGS="$CFLAGS${cflags:+ $cflags}" LDFLAGS="$ldflags" \
     ./configure "${CK_PHP_CONFIGURE[@]}"
   ck_php_run "$src" make -j"$jobs"

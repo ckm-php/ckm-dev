@@ -29,6 +29,7 @@ readonly CK_BUILD_ROOT=/opt/ck-dev-build
 
 # The repository root, found from this file's location.
 CK_REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)
+# shellcheck disable=SC2034 # used by the files that source this one
 readonly CK_REPO_ROOT
 
 # ck_log <message...>: prints one line to stderr.

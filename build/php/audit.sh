@@ -168,7 +168,7 @@ ck_elf_symbol_versions() {
 # (LC_BUILD_VERSION minos or LC_VERSION_MIN_MACOSX version), from
 # `otool -l`.
 ck_macho_loads() {
-  local out line cmd= key rest value
+  local out line cmd='' key rest value
   out=$(otool -l "$1") || ck_die "otool -l failed on $1"
   while IFS= read -r line; do
     line=${line#"${line%%[! ]*}"}
@@ -285,7 +285,7 @@ ck_audit_layout() {
 # ck_audit_linux_file <root> <file> <cpu>: the ELF rules for one file;
 # adds the names in lib/ it links to CK_AUDIT_LINKED.
 ck_audit_linux_file() {
-  local root=$1 file=$2 cpu=$3 folder want header dynamic tag value rpaths= runpath= soname=
+  local root=$1 file=$2 cpu=$3 folder want header dynamic tag value rpaths='' runpath='' soname=''
   local needed=0 v versions max=
   folder=$(ck_object_folder "$root" "$file") || exit 1
   if ! ck_is_elf "$file"; then
@@ -367,7 +367,7 @@ ck_audit_linux_file() {
 # ck_audit_macos_file <root> <file>: the Mach-O rules for one file; adds
 # the names in lib/ it links to CK_AUDIT_LINKED.
 ck_audit_macos_file() {
-  local root=$1 file=$2 folder want loads cmd value name archs rpaths= id= minos=
+  local root=$1 file=$2 folder want loads cmd value name archs rpaths='' id='' minos=''
   folder=$(ck_object_folder "$root" "$file") || exit 1
   if ! ck_is_macho "$file"; then
     ck_audit_fail "$file is not a Mach-O file"

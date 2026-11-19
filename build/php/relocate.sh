@@ -245,7 +245,7 @@ ck_json_str() {
 
 # ck_json_list <space-separated words>: prints a JSON array of strings.
 ck_json_list() {
-  local word sep= out
+  local word sep='' out
   local -a words
   read -r -a words <<<"$1"
   printf '['
@@ -259,9 +259,9 @@ ck_json_list() {
 
 # ck_php_runtime_json <root>: writes <root>/ck-runtime.json.
 ck_php_runtime_json() {
-  local root=$1 os cpu toolchain baseline name version sha license sep= cacert_sha
+  local root=$1 os cpu toolchain baseline name version sha license sep='' cacert_sha
   local s_release s_php s_line s_os s_cpu s_api s_tool s_src l_builtin l_default l_optional l_patches
-  local s_name s_version s_license s_sha libs= s_ca_version s_ca_sha s_ca_license
+  local s_name s_version s_license s_sha libs='' s_ca_version s_ca_sha s_ca_license
   os=$(ck_os)
   cpu=$(ck_cpu)
   toolchain=$("$CC" --version) || ck_die "relocate: $CC --version failed"
