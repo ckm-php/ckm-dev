@@ -6,14 +6,25 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 ck-sys.workspace = true
 dirs.workspace = true
+ed25519-dalek.workspace = true
+flate2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tar.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+url.workspace = true
+zip.workspace = true
+
+# Test keys only. Signing needs no ed25519-dalek feature, so the release test
+# build (T18) links the same ed25519-dalek as the app.
+[dev-dependencies]
+getrandom.workspace = true
 
 [lints]
 workspace = true

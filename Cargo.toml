@@ -4,6 +4,7 @@ members = [
   "crates/ck-sys",
   "crates/ck-core",
   "crates/ck-cli",
+  "crates/ck-net",
   "apps/desktop/src-tauri",
 ]
 
@@ -14,14 +15,27 @@ rust-version = "1.100"
 publish = false
 
 [workspace.dependencies]
+base64 = "0.23.1"
 ck-core = { path = "crates/ck-core" }
 ck-sys = { path = "crates/ck-sys" }
 clap = { version = "4.6", features = ["derive"] }
 dirs = "7.0.0"
+ed25519-dalek = { version = "3.0.0", default-features = false }
+flate2 = "1.1.11"
+getrandom = "0.4.3"
 libc = "0.2.191"
-serde = { version = "1", features = ["derive"] }
+# TLS for ck-net only. `ring` is the provider; it is set on ck-net's agent,
+# never installed process-wide.
+rustls = { version = "0.23.46", default-features = false, features = [
+  "ring",
+  "std",
+  "tls12",
+] }
+serde ={ version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.1"
+# No `xattr`: extraction never restores extended attributes.
+tar = { version = "0.4.46", default-features = false }
 tauri = "2.12.6"
 tauri-build = "2.7.5"
 thiserror = "2.0.21"
@@ -36,6 +50,12 @@ tokio = { version = "1.54.1", features = [
   "sync",
   "macros",
 ] }
+# No gzip, cookies, JSON or default TLS: ck-net passes its own rustls provider.
+ureq = { version = "3.5.2", default-features = false, features = [
+  "rustls-no-provider",
+  "platform-verifier",
+] }
+url = "2.5.8"
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",
@@ -46,6 +66,8 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_System_Threading",
   "Win32_System_Console",
 ] }
+# Stored and Deflate only: every other method needs C or is refused anyway.
+zip = { version = "9.7.0", default-features = false, features = ["deflate-flate2"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

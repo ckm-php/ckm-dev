@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+# `cargo run -p ck-cli` runs `ck`, not the test service below.
+default-run = "ck"
 
 [[bin]]
 name = "ck"

@@ -7,18 +7,26 @@
 //! <data>/logs/supervisor.log
 //! <data>/logs/services/<id>.log
 //! <data>/state/dev-services.json   debug builds in a test profile only
+//! <data>/state/catalog-state.json  sequence and payload SHA-256 of the accepted catalog
+//! <data>/state/catalog.lock        empty; locked while a catalog is accepted
+//! <data>/catalog/catalog.json      the accepted catalog: its exact signed envelope
+//! <data>/downloads/<name>-<version>.lock                 empty; locked for an install or uninstall
+//! <data>/downloads/<name>-<version>.<pid>.<n>.part       a download in progress
+//! <data>/runtimes/<name>/<version>/                      an installed runtime version
+//! <data>/runtimes/.staging/<name>-<version>.<pid>.<n>/   an unpack or removal in progress
 //! ```
 //!
 //! On Unix, folders are 0700 and files 0600. On Windows the data folder gets a
 //! protected DACL (`ck_sys::windows::make_private_dir`) that everything inside
 //! inherits.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::catalog::schema::{RuntimeName, RuntimeVersion};
 use crate::error::{Error, Result};
 use crate::paths::Paths;
 use crate::service::spec::ServiceId;
@@ -31,6 +39,11 @@ pub(crate) const RUN_DIR: &str = "run";
 const SERVICES_DIR: &str = "services";
 const LOGS_DIR: &str = "logs";
 const STATE_DIR: &str = "state";
+const CATALOG_DIR: &str = "catalog";
+const DOWNLOADS_DIR: &str = "downloads";
+const RUNTIMES_DIR: &str = "runtimes";
+const STAGING_DIR: &str = ".staging";
+const PART_SUFFIX: &str = ".part";
 
 #[cfg(unix)]
 use self::unix as sys;
@@ -86,10 +99,110 @@ impl Paths {
         self.state_dir().join("dev-services.json")
     }
 
+    /// `<data>/state/catalog-state.json`
+    pub fn catalog_state_file(&self) -> PathBuf {
+        self.state_dir().join("catalog-state.json")
+    }
+
+    /// `<data>/state/catalog.lock`
+    pub fn catalog_lock_file(&self) -> PathBuf {
+        self.state_dir().join("catalog.lock")
+    }
+
+    /// `<data>/catalog`
+    pub fn catalog_dir(&self) -> PathBuf {
+        self.data.join(CATALOG_DIR)
+    }
+
+    /// `<data>/catalog/catalog.json`
+    pub fn catalog_file(&self) -> PathBuf {
+        self.catalog_dir().join("catalog.json")
+    }
+
+    /// `<data>/downloads`
+    pub fn downloads_dir(&self) -> PathBuf {
+        self.data.join(DOWNLOADS_DIR)
+    }
+
+    /// `<data>/downloads/<name>-<version>.lock`
+    pub fn runtime_lock_file(&self, name: &RuntimeName, version: &RuntimeVersion) -> PathBuf {
+        self.downloads_dir()
+            .join(format!("{}.lock", target(name, version)))
+    }
+
+    /// `<data>/downloads/<name>-<version>.<pid>.<n>.part`: a new name at
+    /// every call, in this process and across processes.
+    pub fn new_part_file(&self, name: &RuntimeName, version: &RuntimeVersion) -> PathBuf {
+        self.downloads_dir()
+            .join(format!("{}{PART_SUFFIX}", unique_name(name, version)))
+    }
+
+    /// `<data>/runtimes`
+    pub fn runtimes_dir(&self) -> PathBuf {
+        self.data.join(RUNTIMES_DIR)
+    }
+
+    /// `<data>/runtimes/<name>`
+    pub fn runtime_versions_dir(&self, name: &RuntimeName) -> PathBuf {
+        self.runtimes_dir().join(name.as_str())
+    }
+
+    /// `<data>/runtimes/<name>/<version>`
+    pub fn runtime_dir(&self, name: &RuntimeName, version: &RuntimeVersion) -> PathBuf {
+        self.runtime_versions_dir(name).join(version.as_str())
+    }
+
+    /// `<data>/runtimes/.staging`
+    pub fn staging_dir(&self) -> PathBuf {
+        self.runtimes_dir().join(STAGING_DIR)
+    }
+
+    /// `<data>/runtimes/.staging/<name>-<version>.<pid>.<n>`: a new name at
+    /// every call, like [`Paths::new_part_file`].
+    pub fn new_staging_dir(&self, name: &RuntimeName, version: &RuntimeVersion) -> PathBuf {
+        self.staging_dir().join(unique_name(name, version))
+    }
+
     /// `<data>/logs/services`
     fn service_logs_dir(&self) -> PathBuf {
         self.logs_dir().join(SERVICES_DIR)
     }
+}
+
+/// Whether `file_name`, in `downloads/` or `runtimes/.staging/`, is a part
+/// file or staging folder of `name` `version` that any process left:
+/// `<name>-<version>.<pid>.<n>`, plus `.part` in `downloads/`.
+///
+/// The match is exact, so `php` `8.2` never matches what `php` `8.2.1`
+/// left. Only the holder of the version's lock may remove what matches.
+pub fn is_leftover(file_name: &OsStr, name: &RuntimeName, version: &RuntimeVersion) -> bool {
+    let Some(file_name) = file_name.to_str() else {
+        return false;
+    };
+    let stem = file_name.strip_suffix(PART_SUFFIX).unwrap_or(file_name);
+    let mut parts = stem.rsplitn(3, '.');
+    let (Some(n), Some(pid), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let is_number = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    is_number(n) && is_number(pid) && rest == target(name, version)
+}
+
+/// `<name>-<version>`.
+fn target(name: &RuntimeName, version: &RuntimeVersion) -> String {
+    format!("{name}-{version}")
+}
+
+/// `<name>-<version>.<pid>.<n>`, unique in this process and across processes.
+fn unique_name(name: &RuntimeName, version: &RuntimeVersion) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    format!(
+        "{}.{}.{}",
+        target(name, version),
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Creates the folder tree privately, or checks and tightens an existing one.
@@ -119,6 +232,10 @@ pub fn ensure(paths: &Paths) -> Result<()> {
         paths.logs_dir(),
         paths.service_logs_dir(),
         paths.state_dir(),
+        paths.catalog_dir(),
+        paths.downloads_dir(),
+        paths.runtimes_dir(),
+        paths.staging_dir(),
     ] {
         create_private_dir(&dir)?;
     }
@@ -337,5 +454,77 @@ mod windows {
     /// Nothing to check: `run/` inherits the data folder's protected DACL.
     pub(super) fn check_run_dir(_run: &Path) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Profile;
+    use crate::test_support::TempDir;
+
+    fn profile(root: &TempDir) -> Paths {
+        Paths {
+            home: root.path().to_path_buf(),
+            data: root.path().join("data"),
+            profile: Profile::Isolated,
+        }
+    }
+
+    #[test]
+    fn ensure_creates_the_runtime_folders_privately() {
+        let root = TempDir::new("layout");
+        let paths = profile(&root);
+        ensure(&paths).unwrap();
+        for dir in [
+            paths.catalog_dir(),
+            paths.downloads_dir(),
+            paths.runtimes_dir(),
+            paths.staging_dir(),
+        ] {
+            #[cfg(unix)]
+            check_private_dir(&dir).unwrap();
+            #[cfg(windows)]
+            assert!(dir.is_dir(), "{}", dir.display());
+        }
+    }
+
+    #[test]
+    fn leftovers_match_their_own_version_exactly() {
+        let root = TempDir::new("layout");
+        let paths = profile(&root);
+        let php = RuntimeName::new("php").unwrap();
+        let line = RuntimeVersion::new("8.2").unwrap();
+        let patch = RuntimeVersion::new("8.2.1").unwrap();
+
+        let part = paths.new_part_file(&php, &line);
+        assert_ne!(part, paths.new_part_file(&php, &line));
+        let staging = paths.new_staging_dir(&php, &line);
+        for leftover in [&part, &staging] {
+            let file_name = leftover.file_name().unwrap();
+            assert!(
+                is_leftover(file_name, &php, &line),
+                "{}",
+                leftover.display()
+            );
+            assert!(
+                !is_leftover(file_name, &php, &patch),
+                "{}",
+                leftover.display()
+            );
+        }
+
+        let patch_part = paths.new_part_file(&php, &patch);
+        assert!(!is_leftover(patch_part.file_name().unwrap(), &php, &line));
+        let lock = paths.runtime_lock_file(&php, &line);
+        assert!(!is_leftover(lock.file_name().unwrap(), &php, &line));
+        for other in [
+            "php-8.2.part",
+            "php-8.2.x.1.part",
+            "php-8.2..1",
+            "node-8.2.1.2",
+        ] {
+            assert!(!is_leftover(OsStr::new(other), &php, &line), "{other}");
+        }
     }
 }

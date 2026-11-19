@@ -64,6 +64,15 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --locked
 
+      # A release `ck` must ignore the test-profile variables (D21).
+      - name: Release-build test
+        run: cargo test -p ck-cli --release --locked --test release_build
+
+      # A release build trusts only its built-in catalog keys and never
+      # requests plain HTTP (D6).
+      - name: Release catalog-trust test
+        run: cargo test -p ck-core --release --locked --test release_trust
+
       - name: UI checks
         run: pnpm check
 

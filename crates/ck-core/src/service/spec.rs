@@ -16,7 +16,7 @@ pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(15);
 pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A service id: `[a-z0-9][a-z0-9-]{0,31}`, and not a Windows device name
-/// (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`).
+/// (`con`, `prn`, `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`).
 ///
 /// It becomes a file name (`run/services/<id>.json`, `logs/services/<id>.log`),
 /// so every constructor checks it, including deserialization. Device names are
@@ -61,7 +61,7 @@ fn is_valid_id(id: &str) -> bool {
 fn is_windows_device_name(id: &str) -> bool {
     match id.as_bytes() {
         b"con" | b"prn" | b"aux" | b"nul" => true,
-        [b'c', b'o', b'm', digit] | [b'l', b'p', b't', digit] => (b'1'..=b'9').contains(digit),
+        [b'c', b'o', b'm', digit] | [b'l', b'p', b't', digit] => digit.is_ascii_digit(),
         _ => false,
     }
 }
@@ -209,7 +209,7 @@ mod tests {
         let too_long = "a".repeat(33);
         let numbered_devices = ["com", "lpt"]
             .into_iter()
-            .flat_map(|device| (1..=9).map(move |n| format!("{device}{n}")));
+            .flat_map(|device| (0..=9).map(move |n| format!("{device}{n}")));
         let devices = ["con", "prn", "aux", "nul"]
             .into_iter()
             .map(str::to_owned)
