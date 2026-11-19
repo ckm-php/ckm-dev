@@ -1,0 +1,12 @@
+curl
+exif
+fileinfo
+intl
+mbstring
+mysqli
+opcache
+openssl
+pdo_mysql
+pdo_sqlite
+sodium
+sqlite3

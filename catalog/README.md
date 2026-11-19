@@ -2,9 +2,22 @@
 
 The runtime catalog lists every file ckm-dev downloads: the exact URL, SHA256, size, version, OS and CPU of each (D3). It is signed and published on GitHub Releases (D6). The app checks it with `ck_core::catalog` (see "Runtime catalog and downloader" in `docs/ARCHITECTURE.md`).
 
-This folder holds no catalog data yet. M2 adds the files and the script that publishes them. Everything below was built in M1b (round 7) and confirmed by the owner on 2026-11-19 (`docs/plans/round-7.md`).
+No catalog is published yet. This folder holds the inputs of our PHP builds (below). The PHP build workflow (`.github/workflows/php-build.yml`) turns its archives into an unsigned catalog payload, kept only as a run artifact; publishing and offline signing come in M2b.
+
+## Tracked files
+
+| File                | What it holds                                                                                                                                                                                                                  | Who writes it                                                                                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sources.lock.json` | One pin for each source file the PHP build downloads: name, version, URL, SHA256, size, licence, and what the pin refresh checked upstream besides the hash (`gpg`, `minisig`, `sha256-file` or `none`).                       | Only `ck-release lock set`, which `build/php/refresh-pins.sh` calls when a person refreshes a pin. The owner reviews the diff. The build and CI never write it. |
+| `php-lines.json`    | The PHP lines we build. Each line has its library stack, build revision, catalog licence and extension classes (built in, default, optional). Each stack names the version series of the libraries that differ between stacks. | By hand, through a plan. It holds no pins.                                                                                                                      |
+
+- The rules for both files are in `build/php/README.md` ("Frozen interfaces"). `ck-release` refuses a lock that is not in its canonical form, an unknown field, a URL outside the build hosts (`www.php.net`, `github.com`, `download.gnome.org`, `www.sqlite.org`, `curl.se`) and duplicates.
+- Check both: `cargo run -p ck-release -- lock check`.
+- The build hosts are for the build and the pin refresh only. The app's downloader still allows only `github.com` and GitHub's asset hosts.
 
 ## Format
+
+The format and the app's checks below were built in M1b (round 7) and confirmed by the owner on 2026-11-19 (`docs/plans/round-7.md`).
 
 There is one published file per schema, `catalog-v1.json`. It is a single JSON envelope, with no detached signature file:
 

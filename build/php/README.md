@@ -202,3 +202,37 @@ optional  ftp shmop soap ...
 | `ck_release <args...>`        | Runs `$CK_RELEASE_BIN`                                                                                                                                                                                                         |
 
 Sourcing also defines the read-only `CK_BUILD_ROOT` and `CK_REPO_ROOT`. It creates no folder. Path helpers only print. Per-OS flags (compilers, rpath, deployment target) are added by `lib/platform-linux.sh` and `lib/platform-macos.sh` on top of `ck_hermetic_env`.
+
+### `build.sh` stages
+
+`/bin/bash build/php/build.sh <stage> <arg>`. Exit codes: 0 ok, 1 failure, 2 usage. `deps` and `php` need an absolute `CK_RELEASE_BIN` and a writable `/opt/ck-dev-build`. `audit` and `bare-root` need neither, so they run on a fresh runner.
+
+| Stage                    | Does                                                                                                                                                                                    |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deps <legacy\|current>` | Builds the stack into `<root>/deps/<stack>`. It also saves each library's licence files in `share/ck-licenses/<name>-<version>/`, which the cached prefix carries to the `php` stage.   |
+| `php <X.Y>`              | Builds PHP for the line, then relocates, audits, smoke-tests and packs it. Stdout holds only two lines: the archive path, then the descriptor path, both in `<root>/out`.               |
+| `audit <root>`           | The static audit (T6) of an unpacked root                                                                                                                                               |
+| `bare-root <archive>`    | T7. Linux runs the archive in a bare root holding only glibc, its iconv codecs and the allow-listed system libraries (`docker import`, no network). macOS runs it with Homebrew hidden. |
+
+### `lib/fetch.sh`
+
+| Function                                                 | Does                                                                                                                                                                                      |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ck_pins_load <lock export args...>`                     | Loads `ck-release lock export` output into `CK_PINS`. It does this once per process.                                                                                                      |
+| `ck_pin <name>`                                          | Prints that name's single line from `CK_PINS`                                                                                                                                             |
+| `ck_fetch <name> <version> <url> <sha256> <size> <file>` | Ensures `<cache>/<name>-<version>/<file>` exists and is verified (size, then SHA256), then prints its path. A mismatch deletes the file and fails, and it never downloads again silently. |
+| `ck_unpack <archive> <dest>`                             | Unpacks a tarball into a new `dest`. It refuses absolute paths, `..`, more than one top-level entry, special files, and links that leave the tree.                                        |
+| `ck_fetch_unpack <name> <parent>`                        | Runs `ck_pin`, then `ck_fetch`, then `ck_unpack` into `<parent>/<name>-<version>/`                                                                                                        |
+
+### Platform and library recipes
+
+- **`lib/platform-{linux,macos}.sh`:**
+  - `ck_platform_env` exports the compilers and flags for that OS: `-O2 -fPIC`; on macOS also the 12.0 deployment target and `-headerpad_max_install_names`.
+  - `ck_platform_shlib_ext` prints `so` or `dylib`.
+  - `ck_platform_rpath <bin|ext|lib>` prints the rpath for each folder.
+- **`deps/all.sh`:** `ck_deps_build <stack>` builds every library in order: pkgconf, patchelf (Linux only), zlib, openssl, libxml2, sqlite, oniguruma, libsodium, icu, curl.
+- **`deps/<name>.sh`:** each defines `ck_dep_<name>`. It skips the build when the stamp `<prefix>/.stamps/<name>-<version>` already exists.
+
+### Keys
+
+`keys/<component>.gpg` and `.fingerprints` hold the keyring and the allowed signers that `refresh-pins.sh` verifies against. `keys/<component>.unsigned` records why a component has no signature check (zlib: its key is on no approved host). `keys/README.md` lists where each key came from.

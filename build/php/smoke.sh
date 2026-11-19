@@ -102,7 +102,7 @@ ck_smoke_php() {
   return "$status"
 }
 
-# ck_smoke <root> [<php version>]: the three runs above.
+# ck_smoke <root> [<php version>]: the runs above, plus `php -m` for the log.
 ck_smoke() {
   local root=${1:-} want=${2:-${CK_PHP_EXPECT_VERSION:-}} status name setting module
   case "$root" in
@@ -123,6 +123,12 @@ ck_smoke() {
       *) ck_die "smoke: php -v does not name PHP $want" ;;
     esac
   fi
+
+  # The built-in modules, printed to the log so build/php/expected/ can be
+  # checked against what the binary really has.
+  status=0
+  ck_smoke_php "$root" "${CK_SMOKE_BASE[@]}" -m || status=$?
+  ck_smoke_check "php -m" "$status"
 
   status=0
   ck_smoke_php "$root" "${CK_SMOKE_BASE[@]}" "${CK_SMOKE_LOAD[@]}" "$CK_SMOKE_PHP" || status=$?
