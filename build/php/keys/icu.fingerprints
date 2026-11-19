@@ -1,0 +1,12 @@
+# Fingerprint allow-list for icu: see README.md in this folder.
+#
+# Keyring: KEYS from https://github.com/unicode-org/icu (commit
+# 9e68dceba9994dfc5b11d8e9c4987b0d323f6d46), the file ICU-20873 made the
+# project's key list. ICU publishes no fingerprint anywhere else: its
+# verification page (https://icu.unicode.org/download/verification) names
+# none. Only the two keys that signed the pinned releases are listed.
+
+E52F 0787 7A58 05F9 AF4A  B0AC D46C 5610 D06E 7001  # ICU Release Robot <icu-robot@unicode.org> (signed 79.1)
+
+# Signed 74.2 on 2024-02-01; the key expired in September 2024.
+3DA3 5301 A7C3 3025 7B87  5575 4058 F674 06EA A6AB  # Craig Cornelius <ccornelius@google.com>

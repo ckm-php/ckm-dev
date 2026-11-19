@@ -1,0 +1,124 @@
+{
+  "schema": 1,
+  "stacks": {
+    "legacy": {
+      "curl": "8.17",
+      "icu": "74",
+      "libxml2": "2.11",
+      "openssl": "1.1.1"
+    },
+    "current": {
+      "curl": "8.23",
+      "icu": "79",
+      "libxml2": "2.15",
+      "openssl": "3.5"
+    }
+  },
+  "lines": [
+    {
+      "line": "7.4",
+      "stack": "legacy",
+      "build_revision": 1,
+      "license": "PHP-3.01",
+      "extensions": {
+        "builtin": [
+          "bcmath",
+          "calendar",
+          "core",
+          "ctype",
+          "date",
+          "dom",
+          "filter",
+          "hash",
+          "iconv",
+          "json",
+          "libxml",
+          "mysqlnd",
+          "pcntl",
+          "pcre",
+          "pdo",
+          "phar",
+          "posix",
+          "reflection",
+          "session",
+          "simplexml",
+          "spl",
+          "standard",
+          "tokenizer",
+          "xml",
+          "xmlreader",
+          "xmlwriter",
+          "zlib"
+        ],
+        "default": [
+          "curl",
+          "exif",
+          "fileinfo",
+          "intl",
+          "mbstring",
+          "mysqli",
+          "opcache",
+          "openssl",
+          "pdo_mysql",
+          "pdo_sqlite",
+          "sodium",
+          "sqlite3"
+        ],
+        "optional": ["ftp", "shmop", "soap", "sockets", "sysvmsg", "sysvsem", "sysvshm"]
+      }
+    },
+    {
+      "line": "8.5",
+      "stack": "current",
+      "build_revision": 1,
+      "license": "PHP-3.01",
+      "extensions": {
+        "builtin": [
+          "bcmath",
+          "calendar",
+          "core",
+          "ctype",
+          "date",
+          "dom",
+          "filter",
+          "hash",
+          "iconv",
+          "json",
+          "libxml",
+          "mysqlnd",
+          "opcache",
+          "pcntl",
+          "pcre",
+          "pdo",
+          "phar",
+          "posix",
+          "random",
+          "reflection",
+          "session",
+          "simplexml",
+          "spl",
+          "standard",
+          "tokenizer",
+          "xml",
+          "xmlreader",
+          "xmlwriter",
+          "zlib"
+        ],
+        "default": [
+          "curl",
+          "exif",
+          "fileinfo",
+          "intl",
+          "mbstring",
+          "mysqli",
+          "openssl",
+          "pdo_mysql",
+          "pdo_sqlite",
+          "sodium",
+          "sqlite3"
+        ],
+        "optional": ["ftp", "shmop", "soap", "sockets", "sysvmsg", "sysvsem", "sysvshm"]
+      }
+    }
+  ]
+}

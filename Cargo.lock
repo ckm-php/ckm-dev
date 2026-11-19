@@ -451,6 +451,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "ck-core",
+ "ck-release",
  "ed25519-dalek",
  "flate2",
  "getrandom 0.4.3",
@@ -459,6 +460,22 @@ dependencies = [
  "sha2 0.11.1",
  "tar",
  "ureq",
+ "url",
+]
+
+[[package]]
+name = "ck-release"
+version = "0.1.0"
+dependencies = [
+ "ck-core",
+ "clap",
+ "flate2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tar",
+ "thiserror 2.0.21",
+ "time",
  "url",
 ]
 

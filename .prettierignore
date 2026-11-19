@@ -8,3 +8,5 @@ playwright-report/
 test-results/
 pnpm-lock.yaml
 Cargo.lock
+# Written only by `ck-release lock set`, in its own canonical form.
+catalog/*.lock.json

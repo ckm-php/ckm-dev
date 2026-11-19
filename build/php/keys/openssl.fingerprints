@@ -1,0 +1,16 @@
+# Fingerprint allow-list for openssl: see README.md in this folder.
+#
+# Keyring: openssl-release-keys.asc from the OpenSSL project's own packaging
+# repository, https://github.com/openssl/packages (packaging/common/, commit
+# 4de93290fbaaf299701a6511dab30e7bc6b3baae). Cross-checked on 2026-11-19
+# against https://openssl-library.org/source/ and doc/fingerprints.txt in
+# https://github.com/openssl/openssl (master and OpenSSL_1_1_1-stable).
+
+# Current signing certificate; 3.x releases are signed by its subkey
+# C46E D3F2 CBEF DA1F DAAD A442 64ED 7B1D CCE7 1CB2.
+B146 647E 45A7 B339 47AB  226B 2A2C 87D1 6169 2D40  # OpenSSL <openssl@openssl.org>
+
+# Signed 1.1.1w (2023-09-11). Revoked on 2024-06-19 with reason 0x03, "key
+# is retired" (comment "Key roll-over"), and expired in February 2025. gpgv
+# reports EXPKEYSIG with VALIDSIG for that signature, not REVKEYSIG.
+EFC0 A467 D613 CB83 C7ED  6D30 D894 E2CE 8B3D 79F5  # OpenSSL OMC <openssl-omc@openssl.org>

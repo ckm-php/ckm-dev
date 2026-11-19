@@ -14,9 +14,11 @@ ureq.workspace = true
 url.workspace = true
 
 # T16 and T17: a loopback server, the shared signing helper
-# (`ck-core/tests/support/signing.rs`) and archives to serve.
+# (`ck-core/tests/support/signing.rs`) and archives to serve. ck-release packs
+# the archives the PHP install tests serve.
 [dev-dependencies]
 base64.workspace = true
+ck-release.workspace = true
 ed25519-dalek.workspace = true
 flate2.workspace = true
 getrandom.workspace = true
