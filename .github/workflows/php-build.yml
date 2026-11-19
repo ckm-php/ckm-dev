@@ -62,10 +62,9 @@ jobs:
           EVENT: ${{ github.event_name }}
           INPUT_LINES: ${{ inputs.lines }}
           INPUT_OSES: ${{ inputs.oses }}
-          # What a push to main or a pull request builds. Widen to "7.4 8.5" and "linux macos"
-          # once the narrow run is green.
-          PR_LINES: '8.5'
-          PR_OSES: linux
+          # What a push to main or a pull request builds.
+          PR_LINES: '7.4 8.5'
+          PR_OSES: linux macos
         run: |
           if [ "$EVENT" = workflow_dispatch ]; then
             lines=$INPUT_LINES

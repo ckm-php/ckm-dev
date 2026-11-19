@@ -5,7 +5,7 @@
 #
 # - Linux: a root file system holding only the unpacked archive, the
 #   allow-listed system libraries copied from the host at the paths the host
-#   loads them from, the program interpreter, an empty /tmp and the smoke
+#   loads them from, the program interpreter, glibc's iconv codecs, an empty /tmp and the smoke
 #   script. It is imported into the local Docker image store (no registry)
 #   and run with no network as an unprivileged user.
 # - macOS: the workflow moves /opt/homebrew and the /usr/local library
@@ -102,7 +102,7 @@ ck_bare_copy_host() {
 
 # ck_bare_root_linux <archive> <version>
 ck_bare_root_linux() {
-  local archive=$1 version=$2 rootfs php_dir="/ck dev/php" interp header so path status=0
+  local archive=$1 version=$2 rootfs php_dir="/ck dev/php" interp header so path gconv status=0
   local -a run sonames
   ck_require_cmd docker tar readelf
   rootfs="$CK_BARE_WORK/rootfs"
@@ -128,6 +128,12 @@ ck_bare_root_linux() {
     fi
     ck_bare_copy_host "$rootfs" "$path"
   done
+  # glibc's iconv codecs and their config ship with glibc on every
+  # distribution; PHP's iconv extension needs them.
+  gconv=/usr/lib/x86_64-linux-gnu/gconv
+  [ -d "$gconv" ] || ck_die "bare root: the host has no $gconv"
+  ck_run mkdir -p "$rootfs${gconv%/*}"
+  ck_run cp -RL "$gconv" "$rootfs$gconv"
   ck_run mkdir -p "$rootfs/ck"
   ck_run cp "$CK_SMOKE_PHP" "$rootfs/ck/smoke.php"
 
