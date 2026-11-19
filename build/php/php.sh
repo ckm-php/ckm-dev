@@ -297,6 +297,11 @@ ck_php_build() {
     # found but the bundled crypt never calls.
     ldflags="$ldflags -Wl,--as-needed"
   fi
+  if [ "$os" = macos ] && [ "$line" = 7.4 ]; then
+    # 7.4's configure no longer finds the resolver (res_9_*) with today's
+    # clang, so ext/standard/dns.c would not link.
+    ldflags="$ldflags -lresolv"
+  fi
   jobs=$(ck_jobs)
   # configure records CFLAGS and LDFLAGS in the Makefile.
   # shellcheck disable=SC2153 # CFLAGS and LDFLAGS come from ck_platform_env

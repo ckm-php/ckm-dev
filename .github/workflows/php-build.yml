@@ -36,7 +36,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A newer push or run on the same branch replaces the older one.
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -407,9 +408,16 @@ jobs:
           } >>"$GITHUB_ENV"
 
       # Compiled before Homebrew is hidden on macOS, so only the run happens
-      # without it.
+      # without it: the test binary is run directly, with no cargo.
       - name: Build the contract test
-        run: cargo test -p ck-net --locked --test php_archive --no-run
+        run: |
+          bin=$(cargo test -p ck-net --locked --test php_archive --no-run --message-format=json |
+            jq -r 'select(.reason == "compiler-artifact" and .target.name == "php_archive" and .profile.test == true) | .executable')
+          if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+            echo "::error::no php_archive test binary was built"
+            exit 1
+          fi
+          echo "CK_PHP_TEST_BIN=$bin" >>"$GITHUB_ENV"
 
       # T7 on macOS: PHP must not load anything from Homebrew. /usr/local
       # itself sits in /usr, which is expected to be read-only on the sealed
@@ -439,7 +447,8 @@ jobs:
 
       # T4: install through ck-core into a path with a space, then run there.
       - name: Install and run
-        run: cargo test -p ck-net --locked --test php_archive -- --ignored --nocapture
+        working-directory: crates/ck-net
+        run: '"$CK_PHP_TEST_BIN" --ignored --nocapture'
 
       # T7: Linux runs PHP in a bare root (docker import, no registry).
       - name: Bare root
