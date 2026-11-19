@@ -14,7 +14,8 @@
 //! No error carries ureq's own message: some print the whole URL, query
 //! included, and others the server's text. A failed request gives a fixed
 //! reason with the URL redacted, and a failed body read keeps only its
-//! [`io::ErrorKind`].
+//! [`io::ErrorKind`]. A TLS failure keeps rustls's text, escaped: it can
+//! quote names from the server's certificate.
 
 use std::io::{self, Read};
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use ck_core::download::policy::{TransportPolicy, redact};
 use ck_core::download::transport::{
     CONNECT_TIMEOUT, HEADERS_TIMEOUT, READ_TIMEOUT, RESOLVE_TIMEOUT, Request, Response, Transport,
 };
+use ck_core::error::escape_untrusted;
 use ck_core::{Error, Result};
 use ureq::http::HeaderMap;
 use ureq::http::header::LOCATION;
@@ -131,11 +133,11 @@ fn reason(error: &ureq::Error) -> String {
     match error {
         ureq::Error::Timeout(phase) => format!("it timed out ({phase})"),
         ureq::Error::Io(error) => match tls_error(error) {
-            Some(tls) => format!("TLS failed: {tls}"),
+            Some(tls) => tls_failed(tls),
             None => error.kind().to_string(),
         },
-        ureq::Error::Rustls(tls) => format!("TLS failed: {tls}"),
-        ureq::Error::Tls(what) => format!("TLS failed: {what}"),
+        ureq::Error::Rustls(tls) => tls_failed(tls),
+        ureq::Error::Tls(what) => tls_failed(what),
         ureq::Error::HostNotFound => "the host name did not resolve".to_owned(),
         ureq::Error::RequireHttpsOnly(_) => "only HTTPS is allowed".to_owned(),
         ureq::Error::Http(_) | ureq::Error::BadUri(_) => "the URL cannot be sent".to_owned(),
@@ -144,6 +146,11 @@ fn reason(error: &ureq::Error) -> String {
         }
         _ => "the request failed".to_owned(),
     }
+}
+
+/// A certificate name in the text is the server's choice.
+fn tls_failed(error: &dyn std::fmt::Display) -> String {
+    format!("TLS failed: {}", escape_untrusted(&error.to_string()))
 }
 
 /// The rustls error inside an io error: rustls reports a failed handshake as

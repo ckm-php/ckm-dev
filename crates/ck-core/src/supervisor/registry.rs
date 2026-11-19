@@ -1,6 +1,6 @@
 //! Which services the supervisor manages.
 //!
-//! Release builds register none until M3. Debug builds read
+//! Release builds register none yet. Debug builds read
 //! `state/dev-services.json`, and only in an isolated profile, so tests can run
 //! the dummy service. The IPC never carries a program or arguments.
 
@@ -126,7 +126,7 @@ mod dev {
     }
 }
 
-/// Release builds register nothing until M3.
+/// Release builds register nothing yet.
 #[cfg(not(debug_assertions))]
 mod dev {
     use crate::error::Result;

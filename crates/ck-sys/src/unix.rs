@@ -1,6 +1,8 @@
-//! Unix process and user calls: the effective uid, sessions, and signals.
+//! Unix process and user calls: the effective uid, sessions, descriptors and
+//! signals.
 
 use std::fmt;
+use std::fs;
 use std::io;
 
 /// A process id that is safe to pass to `kill(2)` and `killpg(2)`.
@@ -124,6 +126,51 @@ pub fn new_session() -> io::Result<()> {
     Ok(())
 }
 
+/// The folder that lists this process's open descriptors: on Linux a link to
+/// `/proc/self/fd`, on macOS the `fdesc` file system.
+const FD_DIR: &str = "/dev/fd";
+
+/// Closes every descriptor above standard error (3 and up) that this process
+/// holds, such as a caller's `flock` inherited by a detached child.
+///
+/// It lists `FD_DIR` into a list first and closes the listing before closing
+/// anything, so the listing's own descriptor is never closed under it; that
+/// number then fails with `EBADF`, which is ignored.
+///
+/// Call it only while the process has one thread and nothing in it owns a
+/// descriptor of 3 or above, as at the very start of `main`: a Rust value that
+/// owns one of them would be left holding a closed number.
+///
+/// Safety contract: wraps `close` on numbers read from the listing. Closing a
+/// number that no Rust value owns touches no memory; `EBADF` and `EINTR` (the
+/// descriptor is released either way, so it is not retried) are not errors.
+#[allow(unsafe_code, reason = "std has no call that closes a raw descriptor")]
+pub fn close_inherited_fds() -> io::Result<()> {
+    let mut fds = Vec::new();
+    for entry in fs::read_dir(FD_DIR)? {
+        let name = entry?.file_name();
+        let fd = name
+            .to_str()
+            .and_then(|name| name.parse::<libc::c_int>().ok());
+        if let Some(fd) = fd.filter(|fd| *fd > libc::STDERR_FILENO) {
+            fds.push(fd);
+        }
+    }
+    for fd in fds {
+        // SAFETY: `close` touches no memory, and the caller guarantees that no
+        // Rust value owns `fd`; the listing that also used a number here was
+        // dropped when the loop above ended.
+        let result = unsafe { libc::close(fd) };
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            if !matches!(error.raw_os_error(), Some(libc::EBADF | libc::EINTR)) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Sends `signal` to the single process `pid` (`kill(pid, sig)`).
 ///
 /// The caller must have checked that `pid` is still the process it means:
@@ -176,11 +223,22 @@ fn delivery(result: libc::c_int) -> io::Result<Delivery> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
-    use std::process::Command;
+    use std::process::{Child, Command};
 
     use super::*;
+
+    /// Kills and reaps a test child when a test fails before reaping it, so no
+    /// `sleep` outlives the run. `Child::kill` after a reap is a harmless error.
+    pub(crate) struct Reap(pub(crate) Child);
+
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
 
     #[test]
     fn pid_refuses_values_that_kill_treats_specially() {
@@ -195,23 +253,25 @@ mod tests {
     #[test]
     fn signals_reach_a_live_child_and_report_a_reaped_one_as_gone() {
         // A zombie still accepts signals, so "gone" is checked only after `wait`.
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
-        let pid = Pid::new(child.id()).unwrap();
+        let mut child = Reap(Command::new("sleep").arg("30").spawn().unwrap());
+        let pid = Pid::new(child.0.id()).unwrap();
         assert_eq!(signal_process(pid, Signal::Term).unwrap(), Delivery::Sent);
-        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert_eq!(child.0.wait().unwrap().signal(), Some(libc::SIGTERM));
         assert_eq!(
             signal_process(pid, Signal::Term).unwrap(),
             Delivery::NoSuchProcess
         );
 
-        let mut leader = Command::new("sleep")
-            .arg("30")
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let group = Pid::new(leader.id()).unwrap();
+        let mut leader = Reap(
+            Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let group = Pid::new(leader.0.id()).unwrap();
         assert_eq!(signal_group(group, Signal::Term).unwrap(), Delivery::Sent);
-        assert_eq!(leader.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert_eq!(leader.0.wait().unwrap().signal(), Some(libc::SIGTERM));
         assert_eq!(
             signal_group(group, Signal::Term).unwrap(),
             Delivery::NoSuchProcess

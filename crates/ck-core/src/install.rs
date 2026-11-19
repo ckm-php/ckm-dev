@@ -58,13 +58,15 @@ pub struct InstalledRuntime {
 /// 2. Takes the artifact for this computer from [`Catalog::artifact`], which
 ///    refuses an expired catalog at `now`. This comes before the lock, so an
 ///    expired catalog requests, locks and changes nothing.
-/// 3. On Unix, checks that `downloads/` and `runtimes/.staging/` are private
-///    folders ([`Error::NotPrivate`]), then takes the version's lock.
+/// 3. On Unix, checks that `runtimes/`, `downloads/` and `runtimes/.staging/`
+///    are private folders ([`Error::NotPrivate`]), then takes the version's
+///    lock.
 /// 4. Under the lock, checks the folder again, then removes this version's
 ///    leftovers ([`crate::layout::is_leftover`]) from both folders.
 /// 5. Fetches under `TransportPolicy::current(paths.profile)`, unpacks into a
-///    new [`Paths::new_staging_dir`], and renames it into place. On Unix the
-///    folders that hold the new entry are synced after the rename. On Windows
+///    new [`Paths::new_staging_dir`], and renames it into place. On Unix,
+///    `runtimes/<name>/` must be a private folder too, and the folders that
+///    hold the new entry are synced after the rename. On Windows
 ///    the rename is retried for a bounded time while another process has a
 ///    file inside open.
 ///
@@ -113,17 +115,19 @@ pub fn install(
     Ok(InstallOutcome::Installed(dest))
 }
 
-/// Removes `name` `version` under its lock: renames the folder into
-/// `runtimes/.staging/`, deletes it, then removes `runtimes/<name>/` when it
-/// is empty. [`Error::NotInstalled`] when the folder does not exist.
+/// Removes `name` `version` under its lock: removes what an earlier failed
+/// install or uninstall of it left in `runtimes/.staging/`, renames the
+/// folder there, deletes it, then removes `runtimes/<name>/` when it is
+/// empty. [`Error::NotInstalled`] when the folder does not exist.
 ///
 /// The rename comes first, so the version is either whole in place or gone
-/// from `runtimes/<name>/`. When the delete fails after it, the error is
-/// returned, and the next install of this version removes what is left in
-/// `runtimes/.staging/`.
+/// from `runtimes/<name>/`. When the delete fails after it, the error says
+/// the version is uninstalled and names what is left in `runtimes/.staging/`;
+/// the next install or uninstall of this version removes it.
 pub fn uninstall(paths: &Paths, name: &RuntimeName, version: &RuntimeVersion) -> Result<()> {
     sys::check_private_folders(paths)?;
     let _lock = RuntimeLock::try_acquire(paths, name, version)?;
+    remove_leftovers(&paths.staging_dir(), name, version)?;
     let dest = paths.runtime_dir(name, version);
     if !is_present(&dest)? {
         return Err(Error::NotInstalled {
@@ -133,7 +137,13 @@ pub fn uninstall(paths: &Paths, name: &RuntimeName, version: &RuntimeVersion) ->
     }
     let staging = paths.new_staging_dir(name, version);
     sys::rename_dir(&dest, &staging).map_err(|e| Error::io("move aside", &dest, e))?;
-    let deleted = fs::remove_dir_all(&staging).map_err(|e| Error::io("delete", &staging, e));
+    let deleted = fs::remove_dir_all(&staging).map_err(|e| {
+        Error::Internal(format!(
+            "{name} {version} is uninstalled, but {} is left behind ({e}); the next install \
+             or uninstall of this version removes it",
+            staging.display()
+        ))
+    });
     let emptied = remove_if_empty(&paths.runtime_versions_dir(name));
     deleted.and(emptied)
 }
@@ -243,8 +253,8 @@ fn remove_leftovers(dir: &Path, name: &RuntimeName, version: &RuntimeVersion) ->
 }
 
 /// Renames the unpacked `staging` folder to `dest`, creating
-/// `runtimes/<name>/` (0700 on Unix) when it is missing, then syncs the
-/// folders that hold the new entries (Unix).
+/// `runtimes/<name>/` (0700 on Unix, and checked as a private folder) when
+/// it is missing, then syncs the folders that hold the new entries (Unix).
 ///
 /// The caller holds the version's lock and found nothing at `dest`. A rename
 /// onto an existing empty folder would replace it on Unix, so that check
@@ -255,15 +265,22 @@ fn move_into_place(paths: &Paths, name: &RuntimeName, staging: &Path, dest: &Pat
     loop {
         tries += 1;
         layout::create_private_dir(&versions)?;
-        match sys::rename_dir(staging, dest) {
+        let moved = sys::check_private_folder(&versions).and_then(|()| {
+            sys::rename_dir(staging, dest)
+                .map_err(|e| Error::io("rename the unpacked runtime to", dest, e))
+        });
+        match moved {
             Ok(()) => break,
-            Err(e) if e.kind() == io::ErrorKind::NotFound && tries < PARENT_TRIES => {}
-            Err(e) => return Err(Error::io("rename the unpacked runtime to", dest, e)),
+            Err(Error::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound && tries < PARENT_TRIES => {}
+            Err(error) => return Err(error),
         }
     }
-    // `runtimes/` too, because `runtimes/<name>/` may be new.
+    // `runtimes/` too, because `runtimes/<name>/` may be new. Best effort:
+    // the version is already in place, so a failure here is not a failed
+    // install.
     for dir in [versions, paths.runtimes_dir()] {
-        sys::sync_dir(&dir).map_err(|e| Error::io("flush", &dir, e))?;
+        let _ = sys::sync_dir(&dir);
     }
     Ok(())
 }
@@ -320,11 +337,19 @@ mod unix {
     use crate::layout;
     use crate::paths::Paths;
 
-    /// `downloads/` and `runtimes/.staging/` must be real folders, owned by
-    /// this user, mode 0700, before anything is created or removed in them.
+    /// `runtimes/`, `downloads/` and `runtimes/.staging/` must be real
+    /// folders, owned by this user, mode 0700, before anything is created or
+    /// removed in them.
     pub(super) fn check_private_folders(paths: &Paths) -> Result<()> {
+        layout::check_private_dir(&paths.runtimes_dir())?;
         layout::check_private_dir(&paths.downloads_dir())?;
         layout::check_private_dir(&paths.staging_dir())
+    }
+
+    /// `runtimes/<name>/`, checked the same way before a version is renamed
+    /// into it.
+    pub(super) fn check_private_folder(dir: &Path) -> Result<()> {
+        layout::check_private_dir(dir)
     }
 
     /// One `rename`: atomic within the data folder.
@@ -349,19 +374,26 @@ mod windows {
     use crate::error::Result;
     use crate::paths::Paths;
 
-    /// Win32 `ERROR_SHARING_VIOLATION`: another process, such as a virus
-    /// scanner or the search indexer, has a file inside the folder open.
-    /// `ck-core` has no `windows-sys`, and `io::Error::raw_os_error` gives an
-    /// `i32`.
+    /// Win32 `ERROR_ACCESS_DENIED` and `ERROR_SHARING_VIOLATION`: another
+    /// process, such as a virus scanner or the search indexer, has a file
+    /// inside the folder open; which one Windows gives depends on how it was
+    /// opened. `ck-core` has no `windows-sys`, and `io::Error::raw_os_error`
+    /// gives an `i32`.
+    const ERROR_ACCESS_DENIED: i32 = 5;
     const ERROR_SHARING_VIOLATION: i32 = 32;
 
     /// At most about one second of retries.
     const RENAME_TRIES: u32 = 10;
     const RENAME_PAUSE: Duration = Duration::from_millis(100);
 
-    /// Nothing to check: both folders inherit the data folder's protected
+    /// Nothing to check: these folders inherit the data folder's protected
     /// DACL.
     pub(super) fn check_private_folders(_paths: &Paths) -> Result<()> {
+        Ok(())
+    }
+
+    /// Nothing to check, as for [`check_private_folders`].
+    pub(super) fn check_private_folder(_dir: &Path) -> Result<()> {
         Ok(())
     }
 
@@ -372,8 +404,10 @@ mod windows {
         loop {
             match fs::rename(from, to) {
                 Err(e)
-                    if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
-                        && tries < RENAME_TRIES =>
+                    if matches!(
+                        e.raw_os_error(),
+                        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+                    ) && tries < RENAME_TRIES =>
                 {
                     tries += 1;
                     thread::sleep(RENAME_PAUSE);
@@ -745,5 +779,49 @@ mod tests {
         assert!(names_in(&corrupt.paths.staging_dir()).is_empty());
         assert!(is_gone(&corrupt.paths.runtime_versions_dir(&php())));
         assert!(installed(&corrupt.paths).unwrap().is_empty());
+
+        // A name's folder that is not private is never renamed into.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let loose = Setup::new(&[("8.4.3", archive("php 8.4.3"))]);
+            let versions = loose.paths.runtime_versions_dir(&php());
+            fs::create_dir(&versions).unwrap();
+            fs::set_permissions(&versions, fs::Permissions::from_mode(0o755)).unwrap();
+            let result = loose.install("8.4.3");
+            assert!(
+                matches!(result, Err(Error::NotPrivate { .. })),
+                "{result:?}"
+            );
+            assert!(names_in(&loose.paths.staging_dir()).is_empty());
+            assert!(names_in(&versions).is_empty());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rename_waits_while_a_file_inside_is_open() {
+        use std::sync::mpsc;
+
+        let root = TempDir::new("rename");
+        let from = root.path().join("from");
+        let to = root.path().join("to");
+        fs::create_dir(&from).unwrap();
+        let held = from.join("held");
+        fs::write(&held, b"x").unwrap();
+
+        // Held for 300 ms, well inside the retry budget of 10 x 100 ms.
+        let (opened, wait) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let file = fs::File::open(&held).unwrap();
+            opened.send(()).unwrap();
+            thread::sleep(Duration::from_millis(300));
+            drop(file);
+        });
+        wait.recv().unwrap();
+        super::windows::rename_dir(&from, &to).unwrap();
+        holder.join().unwrap();
+        assert_eq!(fs::read(to.join("held")).unwrap(), b"x");
     }
 }

@@ -606,6 +606,14 @@ fn tar_links_that_break_a_rule_refuse_the_archive() {
             "l",
             "leads out of the archive",
         ),
+        (
+            Tar::default()
+                .dir("a/")
+                .pax(&[("linkpath", b"")])
+                .symlink("a/l", "safe"),
+            "a/l",
+            "which is empty",
+        ),
     ];
     for (tar, entry, reason) in cases {
         assert_link_refused(&tar.gz(), TarGz, entry, reason);

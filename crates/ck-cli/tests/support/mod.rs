@@ -238,8 +238,8 @@ impl TestProfile {
             data,
             profile: Profile::Isolated,
         };
-        // The same private layout the supervisor creates, including the
-        // protected DACL on Windows, which is only set on a new data folder.
+        // The same private layout the supervisor checks and repairs on every
+        // start, including the protected DACL on Windows.
         layout::ensure(&paths).unwrap_or_else(|error| panic!("cannot create the profile: {error}"));
         let file = serde_json::to_vec_pretty(&DevServicesFile { services })
             .expect("encode dev-services.json");

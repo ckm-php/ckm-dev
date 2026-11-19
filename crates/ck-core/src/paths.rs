@@ -1,20 +1,22 @@
 //! Where ckm-dev keeps its data, and the debug-only test profile (D21).
 //!
-//! This is the only module that reads `CK_DEV_HOME` and `CK_DEV_DATA`, calls
-//! `dirs`, or checks `cfg!(debug_assertions)`. Resolving creates nothing.
+//! This is the only module that reads `CK_DEV_HOME` and `CK_DEV_DATA` or calls
+//! `dirs`, and [`BuildKind::current`] is how runtime code asks for the build
+//! kind. Resolving creates nothing.
 
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::branding::{DATA_DIR_NAME, DEBUG_DATA_DIR_NAME};
 use crate::error::{Error, Result};
 
-/// Test-profile home. Debug builds only; must be absolute.
+/// Test-profile home. Debug builds only; must be absolute, with no `..`.
 pub const HOME_VAR: &str = "CK_DEV_HOME";
 
-/// Test-profile data folder. Debug builds only; needs [`HOME_VAR`]; must be absolute.
+/// Test-profile data folder. Debug builds only; needs [`HOME_VAR`]; must be
+/// absolute, with no `..`.
 pub const DATA_VAR: &str = "CK_DEV_DATA";
 
 /// Whether the running binary is a debug or a release build.
@@ -26,7 +28,8 @@ pub enum BuildKind {
 }
 
 impl BuildKind {
-    /// The kind of this binary. The one place that reads `cfg!(debug_assertions)`.
+    /// The kind of this binary. Code outside tests asks here rather than
+    /// reading `cfg!(debug_assertions)` itself.
     pub const fn current() -> Self {
         if cfg!(debug_assertions) {
             Self::Debug
@@ -115,7 +118,7 @@ impl OsDirs {
 ///   is unset.
 ///
 /// It fails closed, never falling back to the real folders: an empty or
-/// relative value, or `CK_DEV_DATA` without `CK_DEV_HOME`, gives
+/// relative value, a value with a `..` component, or `CK_DEV_DATA` without `CK_DEV_HOME`, gives
 /// [`Error::BadOverride`](crate::Error::BadOverride).
 pub fn resolve(env: &Overrides, build: BuildKind, os: &OsDirs) -> Result<Paths> {
     match build {
@@ -165,7 +168,8 @@ fn test_profile(env: &Overrides) -> Result<Option<Paths>> {
     }))
 }
 
-/// `value` as a path, when it is a non-empty absolute path.
+/// `value` as a path, when it is a non-empty absolute path with no `..`, which
+/// could lead a test profile out of its folder.
 fn absolute(var: &'static str, value: &OsStr) -> Result<PathBuf> {
     if value.is_empty() {
         return Err(Error::BadOverride {
@@ -174,14 +178,22 @@ fn absolute(var: &'static str, value: &OsStr) -> Result<PathBuf> {
         });
     }
     let path = PathBuf::from(value);
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Err(Error::BadOverride {
+    if !path.is_absolute() {
+        return Err(Error::BadOverride {
             var,
             reason: "is not an absolute path",
-        })
+        });
     }
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(Error::BadOverride {
+            var,
+            reason: "contains a `..` component",
+        });
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -284,6 +296,8 @@ mod tests {
     fn debug_builds_fail_closed_on_bad_values() {
         let home = absolute_path("profile");
         let data = absolute_path("profile-data");
+        let home_up = home.join("..").join("escape");
+        let data_up = data.join("..").join("escape");
         let cases = [
             (overrides(None, Some(data.as_path())), DATA_VAR),
             (overrides(Some(Path::new("relative/home")), None), HOME_VAR),
@@ -294,6 +308,11 @@ mod tests {
             (overrides(Some(Path::new("")), None), HOME_VAR),
             (
                 overrides(Some(home.as_path()), Some(Path::new(""))),
+                DATA_VAR,
+            ),
+            (overrides(Some(home_up.as_path()), None), HOME_VAR),
+            (
+                overrides(Some(home.as_path()), Some(data_up.as_path())),
                 DATA_VAR,
             ),
         ];

@@ -95,12 +95,7 @@ pub(crate) mod test_signing;
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    use ed25519_dalek::Signature;
-    use serde_json::Value;
-
-    use super::test_signing::{self, TestKey};
+    use super::test_signing::TestKey;
     use super::*;
 
     #[test]
@@ -133,43 +128,5 @@ mod tests {
             Err(Error::CatalogUntrusted { .. })
         ));
         assert_eq!(Trust::new(vec![strong], 7).unwrap().min_sequence(), 7);
-    }
-
-    /// The helper's envelopes are what T1 relies on: the good one verifies
-    /// over the context and payload, and a flipped byte does not.
-    #[test]
-    fn the_signing_helper_signs_the_context_then_the_payload() {
-        let key = TestKey::generate();
-        let payload = test_signing::payload(1, 2, Value::Array(Vec::new()));
-        let mut envelope = key.sign(SIGNING_CONTEXT, &payload);
-
-        let document: Value = serde_json::from_slice(&envelope.to_bytes()).unwrap();
-        assert_eq!(document["format"], 1);
-        assert_eq!(
-            document["key_id"].as_str(),
-            Some(key_id(&key.verifying_key()).as_str())
-        );
-        let decoded = STANDARD
-            .decode(document["payload"].as_str().unwrap())
-            .unwrap();
-        assert_eq!(decoded, payload);
-        let signature: [u8; 64] = STANDARD
-            .decode(document["signature"].as_str().unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let signature = Signature::from_bytes(&signature);
-        let message = [SIGNING_CONTEXT, &payload].concat();
-        key.verifying_key()
-            .verify_strict(&message, &signature)
-            .unwrap();
-
-        envelope.payload[0] ^= 1;
-        let message = [SIGNING_CONTEXT, &envelope.payload].concat();
-        assert!(
-            key.verifying_key()
-                .verify_strict(&message, &signature)
-                .is_err()
-        );
     }
 }

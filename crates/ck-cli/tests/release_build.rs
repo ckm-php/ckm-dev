@@ -13,7 +13,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use ck_core::paths::{DATA_VAR, HOME_VAR};
+use ck_core::paths::{DATA_VAR, HOME_VAR, Paths};
 use serde_json::Value;
 
 use temp::{TempRoot, is_inside};
@@ -21,6 +21,9 @@ use temp::{TempRoot, is_inside};
 #[test]
 fn a_release_build_ignores_the_test_profile() {
     let root = TempRoot::create();
+    // The real data folder is only looked at, never created or removed.
+    let real_data = Paths::current().expect("resolve the real folders").data;
+    let existed = real_data.exists();
     let output = Command::new(env!("CARGO_BIN_EXE_ck"))
         .args(["paths", "--json"])
         .env(HOME_VAR, root.path())
@@ -36,6 +39,13 @@ fn a_release_build_ignores_the_test_profile() {
     assert_eq!(document["profile"].as_str(), Some("standard"), "{document}");
     let data = Path::new(document["data"].as_str().expect("a data folder"));
     assert!(!is_inside(data, root.path()), "{document}");
+    assert_eq!(data, real_data.as_path(), "{document}");
+    assert_eq!(
+        real_data.exists(),
+        existed,
+        "ck paths changed whether {} exists",
+        real_data.display()
+    );
     assert!(
         fs::read_dir(root.path())
             .expect("list the temporary folder")

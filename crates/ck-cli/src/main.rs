@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use ck_core::{Error, Paths, Result, branding};
+use ck_core::{Error, Paths, Result, branding, supervisor};
 use clap::{Args, Parser, Subcommand};
 
 mod commands;
@@ -94,7 +94,19 @@ fn main() -> ExitCode {
 
 /// Runs `command` on a current-thread runtime, which the supervisor and the
 /// client both expect.
+///
+/// A detached supervisor leaves the caller's session first, while this
+/// process has one thread and holds no descriptor of its own.
 fn run(command: Command) -> Result<()> {
+    let detach = matches!(
+        command,
+        Command::Supervisor {
+            command: SupervisorCommand::Run { detached: true }
+        }
+    );
+    if detach {
+        supervisor::detach()?;
+    }
     let paths = Paths::current()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -110,7 +122,7 @@ async fn dispatch(command: Command, paths: Paths) -> Result<()> {
         Command::Stop { service, flag } => commands::stop(&paths, &service, flag.json).await,
         Command::Supervisor { command } => match command {
             SupervisorCommand::Stop(flag) => commands::supervisor_stop(&paths, flag.json).await,
-            SupervisorCommand::Run { detached } => commands::supervisor_run(paths, detached).await,
+            SupervisorCommand::Run { .. } => commands::supervisor_run(paths).await,
         },
         Command::Paths(flag) => commands::paths(paths, flag.json),
     }

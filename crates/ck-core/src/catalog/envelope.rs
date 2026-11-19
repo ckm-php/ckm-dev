@@ -17,7 +17,7 @@ use ed25519_dalek::{SIGNATURE_LENGTH, Signature, VerifyingKey};
 use serde::Deserialize;
 
 use super::trust::{self, SIGNING_CONTEXT};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, escape_untrusted};
 
 /// The envelope format this app reads.
 pub const FORMAT: u32 = 1;
@@ -55,9 +55,11 @@ pub fn verify(bytes: &[u8], keys: &[VerifyingKey]) -> Result<Vec<u8>> {
     }
     let envelope: RawEnvelope = serde_json::from_slice(bytes).map_err(|error| {
         // The text can quote the unsigned bytes, such as an unknown field's
-        // name, so it is escaped before it can reach a terminal.
-        let reason = error.to_string().escape_debug().collect::<String>();
-        invalid(format!("the envelope: {reason}"))
+        // name.
+        invalid(format!(
+            "the envelope: {}",
+            escape_untrusted(&error.to_string())
+        ))
     })?;
     if envelope.format != FORMAT {
         return Err(invalid(format!(

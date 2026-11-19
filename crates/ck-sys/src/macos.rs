@@ -88,12 +88,13 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::unix::tests::Reap;
     use crate::unix::{Delivery, Signal, signal_process};
 
     #[test]
     fn identity_is_read_while_alive_and_none_once_reaped() {
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
-        let pid = Pid::new(child.id()).unwrap();
+        let mut child = Reap(Command::new("sleep").arg("30").spawn().unwrap());
+        let pid = Pid::new(child.0.id()).unwrap();
         assert!(
             process_start_time(pid)
                 .unwrap()
@@ -103,7 +104,7 @@ mod tests {
         assert!(exe.is_absolute() && exe.ends_with("sleep"), "{exe:?}");
 
         assert_eq!(signal_process(pid, Signal::Term).unwrap(), Delivery::Sent);
-        assert!(!child.wait().unwrap().success());
+        assert!(!child.0.wait().unwrap().success());
         assert_eq!(process_start_time(pid).unwrap(), None);
         assert_eq!(process_exe(pid).unwrap(), None);
     }

@@ -684,22 +684,13 @@ async fn stop_service(
 #[cfg(all(test, unix))]
 mod tests {
     use std::process::{Child, Command};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
     use crate::paths::Profile;
     use crate::service::spec::{
         DEFAULT_READY_TIMEOUT, DEFAULT_STOP_TIMEOUT, StopMethod, StopSignal,
     };
-
-    /// Removes the test's folder, even when an assertion fails.
-    struct TempDir(PathBuf);
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TempDir;
 
     /// Kills and reaps the test's own child, even when an assertion fails.
     struct OwnChild(Child);
@@ -713,16 +704,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_record_with_another_start_time_is_deleted_and_never_signalled() {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = TempDir(
-            std::env::temp_dir().join(format!("ck-core-t6-{}-{nanos}", std::process::id())),
-        );
+        let root = TempDir::new("manager");
         let paths = Paths {
-            home: root.0.clone(),
-            data: root.0.join("data"),
+            home: root.path().to_path_buf(),
+            data: root.path().join("data"),
             profile: Profile::Isolated,
         };
         std::fs::create_dir_all(paths.records_dir()).unwrap();

@@ -19,7 +19,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::{Error, Result};
+use crate::download::fetch::parse_strict_url;
+use crate::error::{Error, Result, escape_untrusted};
 use crate::extract::names::is_reserved_component;
 use crate::service::spec::ServiceId;
 
@@ -31,6 +32,12 @@ pub const MAX_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// The longest version, in bytes.
 const MAX_VERSION_BYTES: usize = 64;
+
+/// The longest licence expression, in bytes.
+const MAX_LICENSE_BYTES: usize = 128;
+
+/// The longest artifact URL, in bytes.
+const MAX_URL_BYTES: usize = 2048;
 
 /// A whole payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +80,9 @@ pub struct Artifact {
 /// span fields:
 ///
 /// - `schema` is [`SCHEMA`];
+/// - every `license` is 1 to 128 bytes with no control characters;
+/// - every `url` is at most 2048 bytes and parses as strictly as the
+///   downloader parses it;
 /// - every `size` is 1 byte to [`MAX_ARTIFACT_BYTES`];
 /// - no two artifacts share a name, version, OS and CPU. Versions compare
 ///   ignoring case, because on macOS and Windows `1.0A` and `1.0a` would
@@ -81,8 +91,12 @@ pub struct Artifact {
 /// JSON that does not fit the types, or a broken rule, gives
 /// [`Error::CatalogInvalid`].
 pub fn parse(payload: &[u8]) -> Result<Payload> {
-    let payload: Payload = serde_json::from_slice(payload)
-        .map_err(|error| invalid(format!("the payload: {error}")))?;
+    let payload: Payload = serde_json::from_slice(payload).map_err(|error| {
+        invalid(format!(
+            "the payload: {}",
+            escape_untrusted(&error.to_string())
+        ))
+    })?;
     if payload.schema != SCHEMA {
         return Err(invalid(format!(
             "payload schema {} is not supported; this app reads schema {SCHEMA}",
@@ -93,15 +107,40 @@ pub fn parse(payload: &[u8]) -> Result<Payload> {
     Ok(payload)
 }
 
-/// The size of each artifact, and no two for one name, version and platform.
+/// Each licence, the URL and size of each artifact, and no two artifacts for
+/// one name, version and platform.
 fn check_artifacts(runtimes: &[Runtime]) -> Result<()> {
     let mut seen = HashSet::new();
     for runtime in runtimes {
+        let license = &runtime.license;
+        if license.is_empty()
+            || license.len() > MAX_LICENSE_BYTES
+            || license.chars().any(char::is_control)
+        {
+            return Err(invalid(format!(
+                "{} {} has a licence that is not 1 to {MAX_LICENSE_BYTES} bytes without \
+                 control characters",
+                runtime.name, runtime.version
+            )));
+        }
         for artifact in &runtime.artifacts {
             let platform = Platform {
                 os: artifact.os,
                 arch: artifact.arch,
             };
+            // The URL is never echoed: it may carry a token.
+            if artifact.url.len() > MAX_URL_BYTES {
+                return Err(invalid(format!(
+                    "{} {} for {platform} has a URL over {MAX_URL_BYTES} bytes",
+                    runtime.name, runtime.version
+                )));
+            }
+            if let Err(error) = parse_strict_url(&artifact.url) {
+                return Err(invalid(format!(
+                    "{} {} for {platform} has a URL the downloader refuses: {error}",
+                    runtime.name, runtime.version
+                )));
+            }
             if !(1..=MAX_ARTIFACT_BYTES).contains(&artifact.size) {
                 return Err(invalid(format!(
                     "{} {} for {platform} has size {}, not 1 to {MAX_ARTIFACT_BYTES} bytes",
