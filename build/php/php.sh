@@ -254,7 +254,7 @@ ck_php_apply_patches() {
 # (left exported for relocation), and checks the stack is built.
 ck_php_build() {
   local line=${1:-} os dir src prefix pin name version url sha size file archive
-  local jobs cflags ldflags sdk
+  local jobs cflags ldflags libs sdk
   ck_check_line "$line"
   ck_php_line_load "$line"
   os=$(ck_os)
@@ -297,15 +297,17 @@ ck_php_build() {
     # found but the bundled crypt never calls.
     ldflags="$ldflags -Wl,--as-needed"
   fi
+  libs=''
   if [ "$os" = macos ] && [ "$line" = 7.4 ]; then
-    # 7.4's configure no longer finds the resolver (res_9_*) with today's
-    # clang, so ext/standard/dns.c would not link.
-    ldflags="$ldflags -lresolv"
+    # 7.4's configure no longer finds the resolver (res_9_*, dns_*) with
+    # today's clang, so ext/standard/dns.c would not link. It drops -l from
+    # LDFLAGS; LIBS reaches the link line.
+    libs=-lresolv
   fi
   jobs=$(ck_jobs)
-  # configure records CFLAGS and LDFLAGS in the Makefile.
+  # configure records CFLAGS, LDFLAGS and LIBS in the Makefile.
   # shellcheck disable=SC2153 # CFLAGS and LDFLAGS come from ck_platform_env
-  ck_php_run "$src" env CFLAGS="$CFLAGS${cflags:+ $cflags}" LDFLAGS="$ldflags" \
+  ck_php_run "$src" env CFLAGS="$CFLAGS${cflags:+ $cflags}" LDFLAGS="$ldflags" LIBS="$libs" \
     ./configure "${CK_PHP_CONFIGURE[@]}"
   ck_php_run "$src" make -j"$jobs"
   ck_php_run "$src" make install
