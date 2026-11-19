@@ -7,7 +7,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -101,8 +101,21 @@ pub(super) fn delete(file: &Path) -> Result<()> {
     }
 }
 
+/// Largest record file read. A real record is a few hundred bytes, so a
+/// bigger file is discarded rather than read into memory.
+const MAX_RECORD_BYTES: u64 = 64 * 1024;
+
 fn parse(file: &Path) -> Option<ServiceRecord> {
-    let record: ServiceRecord = serde_json::from_slice(&fs::read(file).ok()?).ok()?;
+    let mut bytes = Vec::new();
+    fs::File::open(file)
+        .ok()?
+        .take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return None;
+    }
+    let record: ServiceRecord = serde_json::from_slice(&bytes).ok()?;
     let own_name = format!("{}.json", record.service);
     (record.schema == RECORD_SCHEMA && file.file_name() == Some(OsStr::new(&own_name)))
         .then_some(record)

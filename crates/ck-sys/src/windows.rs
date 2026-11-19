@@ -15,13 +15,16 @@ use windows_sys::Win32::Foundation::{
     SetHandleInformation,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    GetNamedSecurityInfoW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT,
+    SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, EqualSid, GetSecurityDescriptorDacl, GetTokenInformation,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-    TOKEN_QUERY, TOKEN_USER, TokenUser,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+    GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+    GetTokenInformation, INHERITED_ACE, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -48,6 +51,15 @@ pub use windows_sys::Win32::System::Threading::{
 /// `io::Error::raw_os_error` gives an `i32`.
 pub use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
+/// `ACCESS_ALLOWED_ACE_TYPE`; windows-sys keeps it behind a feature this crate
+/// does not enable.
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+/// LocalSystem and BUILTIN\Administrators, the two accounts besides the
+/// current user that a private folder admits.
+const SYSTEM_SID: &str = "S-1-5-18";
+const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
+
 /// The current user's SID in string form (`S-1-5-21-…`), from the process token.
 ///
 /// Safety contract: opens this process's token with `TOKEN_QUERY`, sizes and
@@ -61,7 +73,10 @@ pub fn current_user_sid() -> io::Result<String> {
 /// Creates an instance of the pipe `name` (`\\.\pipe\…`) that only the current
 /// user can open.
 ///
-/// - The DACL is `D:P(A;;GA;;;<current SID>)`: protected, with one allow entry.
+/// - The descriptor is `O:<current SID>D:P(A;;GA;;;<current SID>)`: the
+///   current user owns it, and its protected DACL has one allow entry. The
+///   explicit owner is what a client checks; without it an elevated process
+///   would give the pipe to Administrators.
 /// - Remote clients are rejected, and the handle is not inheritable.
 /// - `first_instance` makes creation fail when the name already exists, so
 ///   another process cannot have squatted on it.
@@ -80,7 +95,7 @@ pub fn current_user_sid() -> io::Result<String> {
 )]
 pub fn private_pipe_server(name: &str, first_instance: bool) -> io::Result<NamedPipeServer> {
     let sid = current_user_sid()?;
-    let descriptor = security_descriptor(&format!("D:P(A;;GA;;;{sid})"))?;
+    let descriptor = security_descriptor(&format!("O:{sid}D:P(A;;GA;;;{sid})"))?;
     let mut attributes = SECURITY_ATTRIBUTES {
         nLength: size_u32::<SECURITY_ATTRIBUTES>()?,
         lpSecurityDescriptor: descriptor.0,
@@ -120,10 +135,15 @@ pub fn pipe_client_is_current_user(pipe: &NamedPipeServer) -> io::Result<bool> {
     runs_as_current_user(pid)
 }
 
-/// Whether the server end of `pipe` runs as the current user (token SID).
+/// Whether the server end of `pipe` runs as the current user (token SID), and
+/// the pipe itself is owned by the current user.
+///
+/// The owner check does not depend on the server's process id, so a server
+/// that exits and has its id reused between the two reads still fails it.
 ///
 /// Safety contract: as [`pipe_client_is_current_user`], starting from
-/// `GetNamedPipeServerProcessId`.
+/// `GetNamedPipeServerProcessId`; the owner is read from the borrowed pipe
+/// handle with `GetSecurityInfo`.
 #[allow(
     unsafe_code,
     reason = "GetNamedPipeServerProcessId has no safe wrapper"
@@ -136,7 +156,11 @@ pub fn pipe_server_is_current_user(pipe: &NamedPipeClient) -> io::Result<bool> {
     if found == FALSE {
         return Err(io::Error::last_os_error());
     }
-    runs_as_current_user(pid)
+    if !runs_as_current_user(pid)? {
+        return Ok(false);
+    }
+    let pipe_security = SecurityInfo::read(Object::Handle(pipe.as_raw_handle()))?;
+    Ok(pipe_security.owner_is(&ProcessUser::current()?))
 }
 
 /// Compares the token user of process `pid` with this process's.
@@ -152,14 +176,17 @@ fn runs_as_current_user(pid: u32) -> io::Result<bool> {
 
 /// Makes the folder `path` private, creating it first when it is missing.
 ///
-/// It sets a protected DACL (no entries inherited from the parent) that gives
-/// full control to the current user, SYSTEM and Administrators only, and is
-/// inherited by every file and folder inside.
+/// It sets the current user as owner and a protected DACL (no entries
+/// inherited from the parent) that gives full control to the current user,
+/// SYSTEM and Administrators only, and is inherited by every file and folder
+/// inside. The explicit owner matters on an elevated token, whose new objects
+/// may otherwise be owned by Administrators and fail [`is_private_dir`].
 ///
 /// Safety contract: builds the descriptor from SDDL with
 /// `ConvertStringSecurityDescriptorToSecurityDescriptorW`, applies its DACL
-/// with `SetNamedSecurityInfoW` on a NUL-terminated wide copy of `path` owned
-/// by this function, and frees the descriptor with `LocalFree`.
+/// and then its owner with two `SetNamedSecurityInfoW` calls on a
+/// NUL-terminated wide copy of `path` owned by this function, and frees the
+/// descriptor with `LocalFree`.
 #[allow(
     unsafe_code,
     reason = "folder DACLs are set through Win32 calls with no safe wrapper"
@@ -168,8 +195,24 @@ pub fn make_private_dir(path: &Path) -> io::Result<()> {
     std::fs::create_dir_all(path)?;
     let sid = current_user_sid()?;
     let descriptor = security_descriptor(&format!(
-        "D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+        "O:{sid}D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
     ))?;
+
+    let mut owner: PSID = ptr::null_mut();
+    let mut owner_defaulted = FALSE;
+    // SAFETY: the descriptor is owned by `descriptor` and alive; both
+    // out-parameters are locals.
+    let found = unsafe {
+        GetSecurityDescriptorOwner(descriptor.0, &raw mut owner, &raw mut owner_defaulted)
+    };
+    if found == FALSE {
+        return Err(io::Error::last_os_error());
+    }
+    if owner.is_null() {
+        return Err(io::Error::other(
+            "the private folder's security descriptor has no owner",
+        ));
+    }
 
     let mut present = FALSE;
     let mut dacl: *mut ACL = ptr::null_mut();
@@ -195,6 +238,8 @@ pub fn make_private_dir(path: &Path) -> io::Result<()> {
     }
 
     let wide_path = wide_nul(path.as_os_str())?;
+    // The DACL goes first: setting the owner needs WRITE_OWNER, which the
+    // user may only hold once this DACL grants full control.
     // SAFETY: `wide_path` is NUL-terminated and `dacl` points into
     // `descriptor`; both outlive the call. Owner, group and SACL are null, so
     // they are left unchanged.
@@ -212,7 +257,63 @@ pub fn make_private_dir(path: &Path) -> io::Result<()> {
     if status != ERROR_SUCCESS {
         return Err(io::Error::from_raw_os_error(status.cast_signed()));
     }
+    // SAFETY: `wide_path` is NUL-terminated and `owner` points into
+    // `descriptor`; both outlive the call. Group, DACL and SACL are null, so
+    // they are left unchanged.
+    let status = unsafe {
+        SetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            owner,
+            ptr::null_mut(),
+            ptr::null(),
+            ptr::null(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status.cast_signed()));
+    }
     Ok(())
+}
+
+/// Whether the folder `path` is private as [`make_private_dir`] leaves it: the
+/// current user owns it, its DACL is protected, and every entry is an explicit
+/// allow entry for the current user, SYSTEM or Administrators, with one for
+/// the current user.
+///
+/// Safety contract: reads the owner and DACL through [`SecurityInfo`], which
+/// owns the descriptor they point into.
+pub fn is_private_dir(path: &Path) -> io::Result<bool> {
+    let security = SecurityInfo::read(Object::Path(path))?;
+    let user = ProcessUser::current()?;
+    if !security.owner_is(&user) || !security.dacl_protected()? {
+        return Ok(false);
+    }
+    let Some(aces) = security.aces()? else {
+        return Ok(false);
+    };
+    let own = user.sid_string()?;
+    let mut admits_user = false;
+    for ace in aces {
+        let Some(sid) = ace.allowed_sid.filter(|_| !ace.inherited) else {
+            return Ok(false);
+        };
+        if sid == own {
+            admits_user = true;
+        } else if sid != SYSTEM_SID && sid != ADMINISTRATORS_SID {
+            return Ok(false);
+        }
+    }
+    Ok(admits_user)
+}
+
+/// Whether the current user owns the file or folder `path`.
+///
+/// Safety contract: as [`is_private_dir`].
+pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
+    let security = SecurityInfo::read(Object::Path(path))?;
+    Ok(security.owner_is(&ProcessUser::current()?))
 }
 
 /// A Job Object that ends every process in it when its last handle closes.
@@ -371,6 +472,157 @@ fn security_descriptor(sddl: &str) -> io::Result<LocalMemory> {
     Ok(LocalMemory(descriptor))
 }
 
+/// What [`SecurityInfo::read`] reads from.
+enum Object<'a> {
+    /// A kernel object, such as a pipe, through a handle the caller keeps open.
+    Handle(HANDLE),
+    /// A file or folder, by path.
+    Path(&'a Path),
+}
+
+/// The owner and DACL of an object, read back from the system.
+struct SecurityInfo {
+    /// Owns the self-relative descriptor that `owner` and `dacl` point into.
+    descriptor: LocalMemory,
+    /// Null when the descriptor has no owner.
+    owner: PSID,
+    /// Null for a NULL DACL, which admits everyone.
+    dacl: *mut ACL,
+}
+
+/// One entry of a DACL.
+struct Ace {
+    /// The SID in string form for an allow entry; `None` for any other kind.
+    allowed_sid: Option<String>,
+    /// Inherited from a parent rather than set on the object.
+    inherited: bool,
+}
+
+impl SecurityInfo {
+    /// Reads the owner and DACL of `object`.
+    #[allow(unsafe_code, reason = "security descriptors are read through Win32")]
+    fn read(object: Object<'_>) -> io::Result<Self> {
+        let which = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+        let mut owner: PSID = ptr::null_mut();
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        let status = match object {
+            Object::Handle(handle) => {
+                // SAFETY: the caller keeps `handle` open for the call; `owner`,
+                // `dacl` and `descriptor` are local out-parameters, and group
+                // and SACL are null because they are not requested.
+                unsafe {
+                    GetSecurityInfo(
+                        handle,
+                        SE_KERNEL_OBJECT,
+                        which,
+                        &raw mut owner,
+                        ptr::null_mut(),
+                        &raw mut dacl,
+                        ptr::null_mut(),
+                        &raw mut descriptor,
+                    )
+                }
+            }
+            Object::Path(path) => {
+                let wide = wide_nul(path.as_os_str())?;
+                // SAFETY: `wide` is NUL-terminated and outlives the call; the
+                // out-parameters are as above.
+                unsafe {
+                    GetNamedSecurityInfoW(
+                        wide.as_ptr(),
+                        SE_FILE_OBJECT,
+                        which,
+                        &raw mut owner,
+                        ptr::null_mut(),
+                        &raw mut dacl,
+                        ptr::null_mut(),
+                        &raw mut descriptor,
+                    )
+                }
+            }
+        };
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status.cast_signed()));
+        }
+        Ok(Self {
+            descriptor: LocalMemory(descriptor),
+            owner,
+            dacl,
+        })
+    }
+
+    /// Whether `user` owns the object.
+    #[allow(unsafe_code, reason = "EqualSid has no safe wrapper")]
+    fn owner_is(&self, user: &ProcessUser) -> bool {
+        if self.owner.is_null() {
+            return false;
+        }
+        // SAFETY: `self.owner` points into the descriptor that `self` owns, and
+        // `user` keeps its own SID alive for the call.
+        let equal = unsafe { EqualSid(self.owner, user.sid()) };
+        equal != FALSE
+    }
+
+    /// Whether the DACL is protected from inheriting its parent's entries.
+    #[allow(
+        unsafe_code,
+        reason = "GetSecurityDescriptorControl has no safe wrapper"
+    )]
+    fn dacl_protected(&self) -> io::Result<bool> {
+        let mut control = 0_u16;
+        let mut revision = 0_u32;
+        // SAFETY: the descriptor is owned by `self` and alive; the
+        // out-parameters are locals.
+        let read = unsafe {
+            GetSecurityDescriptorControl(self.descriptor.0, &raw mut control, &raw mut revision)
+        };
+        if read == FALSE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(control & SE_DACL_PROTECTED != 0)
+    }
+
+    /// The DACL's entries, or `None` for a NULL DACL.
+    #[allow(unsafe_code, reason = "ACL entries are read through Win32")]
+    fn aces(&self) -> io::Result<Option<Vec<Ace>>> {
+        if self.dacl.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: `self.dacl` points at the ACL header inside the descriptor
+        // that `self` owns.
+        let header = unsafe { self.dacl.read() };
+        let mut aces = Vec::with_capacity(usize::from(header.AceCount));
+        for index in 0..u32::from(header.AceCount) {
+            let mut ace: *mut c_void = ptr::null_mut();
+            // SAFETY: `index` is below the ACL's entry count, the ACL lives in
+            // `self`, and `ace` is a local out-parameter.
+            let found = unsafe { GetAce(self.dacl, index, &raw mut ace) };
+            if found == FALSE {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: `ace` points at an entry inside the live ACL, and every
+            // entry starts with an ACE_HEADER.
+            let ace_header = unsafe { ace.cast::<ACE_HEADER>().read() };
+            let allowed_sid = if ace_header.AceType == ACCESS_ALLOWED_ACE_TYPE {
+                // An allow entry stores its SID at `SidStart`, inside the ACL.
+                let sid = ace
+                    .cast::<u8>()
+                    .wrapping_add(mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart))
+                    .cast::<c_void>();
+                Some(sid_to_string(sid)?)
+            } else {
+                None
+            };
+            aces.push(Ace {
+                allowed_sid,
+                inherited: u32::from(ace_header.AceFlags) & INHERITED_ACE != 0,
+            });
+        }
+        Ok(Some(aces))
+    }
+}
+
 /// The user a process runs as: the `TOKEN_USER` of its token.
 struct ProcessUser {
     /// `u64` elements keep the buffer aligned for `TOKEN_USER`, which starts
@@ -480,29 +732,34 @@ impl ProcessUser {
         equal != FALSE
     }
 
-    #[allow(unsafe_code, reason = "ConvertSidToStringSidW has no safe wrapper")]
     fn sid_string(&self) -> io::Result<String> {
-        let sid = self.sid();
-        let mut wide: PWSTR = ptr::null_mut();
-        // SAFETY: `sid` points into `self.buffer`, which outlives the call, and
-        // `wide` is a local out-parameter.
-        let converted = unsafe { ConvertSidToStringSidW(sid, &raw mut wide) };
-        if converted == FALSE {
-            return Err(io::Error::last_os_error());
-        }
-        let _allocation = LocalMemory(wide.cast());
-        let mut units = Vec::new();
-        loop {
-            // SAFETY: the system wrote a NUL-terminated string at `wide`, and the
-            // loop stops at the NUL, so every unit read lies inside it.
-            let unit = unsafe { wide.wrapping_add(units.len()).read() };
-            if unit == 0 {
-                break;
-            }
-            units.push(unit);
-        }
-        String::from_utf16(&units).map_err(io::Error::other)
+        sid_to_string(self.sid())
     }
+}
+
+/// `sid` in string form (`S-1-5-…`). The caller keeps the SID alive and valid
+/// for the call: it points into a buffer or descriptor the system filled.
+#[allow(unsafe_code, reason = "ConvertSidToStringSidW has no safe wrapper")]
+fn sid_to_string(sid: PSID) -> io::Result<String> {
+    let mut wide: PWSTR = ptr::null_mut();
+    // SAFETY: the caller keeps `sid` valid for the call, and `wide` is a local
+    // out-parameter.
+    let converted = unsafe { ConvertSidToStringSidW(sid, &raw mut wide) };
+    if converted == FALSE {
+        return Err(io::Error::last_os_error());
+    }
+    let _allocation = LocalMemory(wide.cast());
+    let mut units = Vec::new();
+    loop {
+        // SAFETY: the system wrote a NUL-terminated string at `wide`, and the
+        // loop stops at the NUL, so every unit read lies inside it.
+        let unit = unsafe { wide.wrapping_add(units.len()).read() };
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+    }
+    String::from_utf16(&units).map_err(io::Error::other)
 }
 
 /// `value` as a NUL-terminated UTF-16 string. An interior NUL is refused,
@@ -529,36 +786,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use tokio::net::windows::named_pipe::ClientOptions;
-    use windows_sys::Win32::Security::Authorization::{
-        GetNamedSecurityInfoW, GetSecurityInfo, SE_KERNEL_OBJECT,
-    };
-    use windows_sys::Win32::Security::{
-        ACCESS_ALLOWED_ACE, ACE_HEADER, GetAce, GetSecurityDescriptorControl, INHERITED_ACE,
-        SE_DACL_PROTECTED,
-    };
 
     use super::*;
-
-    /// `ACCESS_ALLOWED_ACE_TYPE`; windows-sys keeps it behind a feature this
-    /// crate does not enable.
-    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-
-    /// What the tests check about a DACL, copied out of the system's descriptor.
-    struct DaclFacts {
-        protected: bool,
-        aces: Vec<AceFacts>,
-    }
-
-    struct AceFacts {
-        allow: bool,
-        inherited: bool,
-        current_user: bool,
-    }
-
-    enum Object<'a> {
-        Handle(HANDLE),
-        Path(&'a Path),
-    }
 
     fn unique(prefix: &str) -> String {
         let nanos = SystemTime::now()
@@ -566,95 +795,6 @@ mod tests {
             .unwrap()
             .as_nanos();
         format!("{prefix}-{}-{nanos}", std::process::id())
-    }
-
-    #[allow(unsafe_code, reason = "reads a security descriptor back through Win32")]
-    fn dacl_facts(object: Object<'_>) -> DaclFacts {
-        let mut dacl: *mut ACL = ptr::null_mut();
-        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-        let status = match object {
-            Object::Handle(handle) => {
-                // SAFETY: `handle` is open for the call; `dacl` and `descriptor`
-                // are local out-parameters and the others are null.
-                unsafe {
-                    GetSecurityInfo(
-                        handle,
-                        SE_KERNEL_OBJECT,
-                        DACL_SECURITY_INFORMATION,
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        &raw mut dacl,
-                        ptr::null_mut(),
-                        &raw mut descriptor,
-                    )
-                }
-            }
-            Object::Path(path) => {
-                let wide = wide_nul(path.as_os_str()).unwrap();
-                // SAFETY: `wide` is NUL-terminated and outlives the call; `dacl`
-                // and `descriptor` are local out-parameters and the others are null.
-                unsafe {
-                    GetNamedSecurityInfoW(
-                        wide.as_ptr(),
-                        SE_FILE_OBJECT,
-                        DACL_SECURITY_INFORMATION,
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        &raw mut dacl,
-                        ptr::null_mut(),
-                        &raw mut descriptor,
-                    )
-                }
-            }
-        };
-        assert_eq!(status, ERROR_SUCCESS);
-        let _allocation = LocalMemory(descriptor);
-        assert!(!dacl.is_null());
-
-        let mut control = 0_u16;
-        let mut revision = 0_u32;
-        // SAFETY: `descriptor` stays alive in `_allocation`; the out-parameters
-        // are locals.
-        let read = unsafe {
-            GetSecurityDescriptorControl(descriptor, &raw mut control, &raw mut revision)
-        };
-        assert_ne!(read, FALSE);
-
-        // SAFETY: `dacl` points at the ACL header inside the live descriptor.
-        let header = unsafe { dacl.read() };
-        let current = ProcessUser::current().unwrap();
-        let aces = (0..u32::from(header.AceCount))
-            .map(|index| {
-                let mut ace: *mut c_void = ptr::null_mut();
-                // SAFETY: `index` is below the ACL's entry count, and `ace` is a
-                // local out-parameter.
-                let found = unsafe { GetAce(dacl, index, &raw mut ace) };
-                assert_ne!(found, FALSE);
-                // SAFETY: `ace` points at an entry inside the live ACL, and every
-                // entry starts with an ACE_HEADER.
-                let ace_header = unsafe { ace.cast::<ACE_HEADER>().read() };
-                let allow = ace_header.AceType == ACCESS_ALLOWED_ACE_TYPE;
-                let current_user = allow && {
-                    let sid = ace
-                        .cast::<u8>()
-                        .wrapping_add(mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart))
-                        .cast::<c_void>();
-                    // SAFETY: an allow entry stores its SID at `SidStart`, inside
-                    // the live ACL; `current` keeps its own SID alive.
-                    let equal = unsafe { EqualSid(sid, current.sid()) };
-                    equal != FALSE
-                };
-                AceFacts {
-                    allow,
-                    inherited: u32::from(ace_header.AceFlags) & INHERITED_ACE != 0,
-                    current_user,
-                }
-            })
-            .collect();
-        DaclFacts {
-            protected: control & SE_DACL_PROTECTED != 0,
-            aces,
-        }
     }
 
     #[test]
@@ -668,9 +808,12 @@ mod tests {
             let server = private_pipe_server(&name, true).unwrap();
             assert!(private_pipe_server(&name, true).is_err());
 
-            let pipe = dacl_facts(Object::Handle(server.as_raw_handle()));
-            assert_eq!(pipe.aces.len(), 1);
-            assert!(pipe.aces[0].allow && pipe.aces[0].current_user);
+            let user = ProcessUser::current().unwrap();
+            let pipe = SecurityInfo::read(Object::Handle(server.as_raw_handle())).unwrap();
+            assert!(pipe.owner_is(&user));
+            let aces = pipe.aces().unwrap().unwrap();
+            assert_eq!(aces.len(), 1);
+            assert_eq!(aces[0].allowed_sid, Some(user.sid_string().unwrap()));
 
             let client = ClientOptions::new().open(&name).unwrap();
             server.connect().await.unwrap();
@@ -682,13 +825,28 @@ mod tests {
     #[test]
     fn private_dir_gets_a_protected_dacl_with_explicit_entries_only() {
         let path = std::env::temp_dir().join(unique("ck-sys-test"));
+        std::fs::create_dir(&path).unwrap();
+        let plain = is_private_dir(&path);
         make_private_dir(&path).unwrap();
-        let folder = dacl_facts(Object::Path(&path));
+        let private = is_private_dir(&path);
+        let folder = SecurityInfo::read(Object::Path(&path)).unwrap();
+        let protected = folder.dacl_protected().unwrap();
+        let aces = folder.aces().unwrap().unwrap();
+        let own = ProcessUser::current().unwrap().sid_string().unwrap();
+        drop(folder);
         std::fs::remove_dir(&path).unwrap();
 
-        assert!(folder.protected);
-        assert_eq!(folder.aces.len(), 3);
-        assert!(folder.aces.iter().all(|ace| ace.allow && !ace.inherited));
-        assert!(folder.aces.iter().any(|ace| ace.current_user));
+        assert!(!plain.unwrap(), "a folder that inherits its parent's DACL");
+        assert!(private.unwrap());
+        assert!(protected);
+        assert_eq!(aces.len(), 3);
+        assert!(
+            aces.iter()
+                .all(|ace| ace.allowed_sid.is_some() && !ace.inherited)
+        );
+        assert!(
+            aces.iter()
+                .any(|ace| ace.allowed_sid.as_deref() == Some(own.as_str()))
+        );
     }
 }

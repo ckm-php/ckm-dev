@@ -51,16 +51,14 @@ const CLIENT_NAME_CHARS: usize = 64;
 ///   adoption, serve.
 /// - **Single instance:** when another supervisor holds the lock, it returns
 ///   `Ok(())` at once and quietly.
-/// - **`detached`:** set when `client::ensure` spawned it. On Unix it first
-///   calls `ck_sys::unix::new_session()`; a `ck supervisor run` typed in a
-///   shell already leads its group, so it does not.
+/// - **Detaching:** when `client::ensure` spawned it, the caller first runs
+///   [`detach`], before any runtime exists.
 /// - **Shutdown** (a `shutdown` request, `SIGTERM` or `SIGINT`): stop accepting,
 ///   stop every service, remove the socket, return. When a protected service
 ///   will not stop, the shutdown fails and the supervisor keeps running.
 /// - **Logs:** plain UTC lines on stderr, which `client::ensure` points at
 ///   `logs/supervisor.log`.
-pub async fn run(paths: Paths, detached: bool) -> Result<()> {
-    sys::detach(detached)?;
+pub async fn run(paths: Paths) -> Result<()> {
     layout::ensure(&paths)?;
     let Some(lock) = InstanceLock::try_acquire(&paths)? else {
         return Ok(());
@@ -399,6 +397,19 @@ fn log_outcome(action: &str, service: &str, result: &Result<ServiceStatus>) {
     }
 }
 
+/// Leaves the caller's session and drops what the caller handed down, for a
+/// supervisor that `client::ensure` spawned (`ck supervisor run --detached`).
+///
+/// On Unix it calls `setsid` (which fails for a process that already leads a
+/// group, as one typed in a shell does), then closes every inherited
+/// descriptor above standard error, such as a `flock` the caller holds. Call
+/// it first in `main`, while the process has one thread and owns no other
+/// descriptor. On Windows `ensure` already detached it through its creation
+/// flags, so there is nothing to do.
+pub fn detach() -> Result<()> {
+    sys::detach()
+}
+
 /// Waits, up to [`DRAIN_WAIT`], for every connection task to end. Those still
 /// open are cancelled when the caller drops the runtime.
 async fn drain(permits: &Semaphore) {
@@ -422,14 +433,13 @@ mod unix {
 
     use crate::error::{Error, Result};
 
-    /// Leaves the caller's session and terminal (`setsid`) when `ensure`
-    /// spawned this process, which it did without a process group of its own.
-    pub(super) fn detach(detached: bool) -> Result<()> {
-        if detached {
-            ck_sys::unix::new_session()
-                .map_err(|e| Error::os("leave the caller's session (setsid)", e))?;
-        }
-        Ok(())
+    /// `ensure` spawned this process without a process group of its own, so
+    /// `setsid` can make it a session leader.
+    pub(super) fn detach() -> Result<()> {
+        ck_sys::unix::new_session()
+            .map_err(|e| Error::os("leave the caller's session (setsid)", e))?;
+        ck_sys::unix::close_inherited_fds()
+            .map_err(|e| Error::os("close the descriptors inherited from the caller", e))
     }
 
     /// `SIGTERM` and `SIGINT`, each a request to shut down.
@@ -466,7 +476,7 @@ mod windows {
 
     /// Nothing to do: `ensure` spawned this process already detached, through
     /// its creation flags.
-    pub(super) fn detach(_detached: bool) -> Result<()> {
+    pub(super) fn detach() -> Result<()> {
         Ok(())
     }
 

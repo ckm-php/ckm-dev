@@ -32,8 +32,9 @@ fn write(level: &str, message: &dyn Display) {
     let _ = io::stderr().lock().write_all(line.as_bytes());
 }
 
-/// `<UTC time> <level> <message>\n`. Control characters in the message become
-/// spaces, so every entry stays on one line.
+/// `<UTC time> <level> <message>\n`. Control characters, line and paragraph
+/// separators and bidi controls in the message become spaces, so every entry
+/// stays on one line and reads as written.
 fn line(at: OffsetDateTime, level: &str, message: &str) -> String {
     let mut line = format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z {level} ",
@@ -48,8 +49,36 @@ fn line(at: OffsetDateTime, level: &str, message: &str) -> String {
         message
             .chars()
             .take(MAX_MESSAGE_CHARS)
-            .map(|c| if c.is_control() { ' ' } else { c }),
+            .map(|c| if is_unsafe(c) { ' ' } else { c }),
     );
     line.push('\n');
     line
+}
+
+/// Characters that could break a line or reorder how a terminal shows it.
+fn is_unsafe(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}'
+                | '\u{2029}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn separators_and_bidi_controls_become_spaces() {
+        let message = "a\nb\u{2028}c\u{2029}d\u{200E}e\u{202E}f\u{2066}g\u{2069}h";
+        assert_eq!(
+            line(OffsetDateTime::UNIX_EPOCH, "info", message),
+            "1970-01-01T00:00:00Z info a b c d e f g h\n"
+        );
+    }
 }

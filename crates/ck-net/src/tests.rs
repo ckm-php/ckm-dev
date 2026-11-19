@@ -4,13 +4,15 @@
 //! timeout through the private constructor. Debug builds only: the policy of
 //! a release build refuses plain HTTP to loopback.
 
+use std::env;
 use std::io::{ErrorKind, Read, Write};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use ck_core::download::fetch::fetch_bytes;
+use ck_core::catalog::refresh;
+use ck_core::catalog::trust::Trust;
 use ck_core::download::policy::TransportPolicy;
-use ck_core::download::transport::{CATALOG_TIMEOUT, READ_TIMEOUT, Request, Response, Transport};
-use ck_core::paths::Profile;
+use ck_core::download::transport::{READ_TIMEOUT, Request, Response, Transport};
+use ck_core::paths::{Paths, Profile};
 use ck_core::{Error, Result};
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -25,9 +27,6 @@ use self::server::{Reply, TestServer};
 
 /// A stall this long fails a body; far below [`READ_TIMEOUT`].
 const SHORT: Duration = Duration::from_secs(1);
-
-/// The catalog cap for `fetch_bytes`; every body here is smaller.
-const CAP: usize = 1024;
 
 /// The debug test profile's rules, which allow plain HTTP to loopback.
 fn test_policy() -> TransportPolicy {
@@ -92,9 +91,27 @@ fn a_redirect_comes_back_unfollowed_and_ck_core_refuses_one_off_loopback() {
     assert_eq!(response.location.as_deref(), Some("/next"));
     assert_eq!(server.request_lines(), ["GET /start HTTP/1.1"]);
 
-    // Through ck-core, each hop is checked before it is requested. These
-    // never leave the machine even if that check broke: `localhost` is this
-    // server, and `.invalid` never resolves.
+    // Through ck-core's catalog fetch, each hop is checked before it is
+    // requested. These never leave the machine even if that check broke:
+    // `localhost` is this server, and `.invalid` never resolves.
+    //
+    // The bodies here are not envelopes, so `refresh` refuses them before
+    // the disk is touched: the data folder is never created.
+    let paths = Paths {
+        home: env::temp_dir(),
+        data: env::temp_dir().join(format!("ck-net-unused-{}", std::process::id())),
+        profile: Profile::Isolated,
+    };
+    let trust = Trust::new(Vec::new(), 0).unwrap();
+    let fetch = |target: &str| {
+        refresh(
+            &paths,
+            &trust,
+            &transport,
+            &server.url(target),
+            SystemTime::now(),
+        )
+    };
     let port = server.port();
     for (target, location) in [
         (
@@ -107,14 +124,7 @@ fn a_redirect_comes_back_unfollowed_and_ck_core_refuses_one_off_loopback() {
         ),
     ] {
         server.reply(target, Reply::redirect(302, &location));
-        let error = fetch_bytes(
-            &transport,
-            &test_policy(),
-            &server.url(target),
-            CAP,
-            CATALOG_TIMEOUT,
-        )
-        .unwrap_err();
+        let error = fetch(target).unwrap_err();
         assert!(
             matches!(error, Error::UrlRefused { .. }),
             "{location}: {error:?}"
@@ -122,17 +132,12 @@ fn a_redirect_comes_back_unfollowed_and_ck_core_refuses_one_off_loopback() {
         assert_hides_secret(&error);
     }
 
-    // A redirect to the literal loopback address is followed, by ck-core.
+    // A redirect to the literal loopback address is followed, by ck-core:
+    // `/next` is requested, and its body is then refused as no envelope.
     server.reply("/hop", Reply::redirect(307, &server.url("/next")));
-    let bytes = fetch_bytes(
-        &transport,
-        &test_policy(),
-        &server.url("/hop"),
-        CAP,
-        CATALOG_TIMEOUT,
-    )
-    .unwrap();
-    assert_eq!(bytes, b"next");
+    let error = fetch("/hop").unwrap_err();
+    assert!(matches!(error, Error::CatalogInvalid { .. }), "{error:?}");
+    assert!(!paths.data.exists());
     assert_eq!(
         server.request_lines(),
         [

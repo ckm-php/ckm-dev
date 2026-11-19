@@ -209,6 +209,13 @@ pub enum Error {
     Internal(String),
 }
 
+/// `text` from outside the app (a signed payload's parse error, an archive
+/// reader's error, a server's certificate names) with control characters,
+/// quotes and backslashes escaped, so it cannot drive a terminal when shown.
+pub fn escape_untrusted(text: &str) -> String {
+    text.escape_debug().collect()
+}
+
 impl Error {
     /// A file-system error on `path`, for `map_err`.
     pub fn io(op: &'static str, path: impl Into<PathBuf>, source: io::Error) -> Self {

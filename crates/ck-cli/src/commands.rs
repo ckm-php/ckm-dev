@@ -85,8 +85,9 @@ pub async fn supervisor_stop(paths: &Paths, json: bool) -> Result<()> {
 }
 
 /// `ck supervisor run [--detached]`, hidden: `ck_core::supervisor::run`.
-pub async fn supervisor_run(paths: Paths, detached: bool) -> Result<()> {
-    supervisor::run(paths, detached).await
+/// `main` has already detached it when asked.
+pub async fn supervisor_run(paths: Paths) -> Result<()> {
+    supervisor::run(paths).await
 }
 
 /// `ck paths [--json]`. Creates nothing, so it is safe with a release binary.

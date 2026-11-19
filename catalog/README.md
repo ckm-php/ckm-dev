@@ -2,7 +2,7 @@
 
 The runtime catalog lists every file ckm-dev downloads: the exact URL, SHA256, size, version, OS and CPU of each (D3). It is signed and published on GitHub Releases (D6). The app checks it with `ck_core::catalog` (see "Runtime catalog and downloader" in `docs/ARCHITECTURE.md`).
 
-This folder holds no catalog data yet. M2 adds the files and the script that publishes them. Everything below was built in M1b (round 7) and is **provisional** until the owner confirms it (`docs/plans/round-7.md`).
+This folder holds no catalog data yet. M2 adds the files and the script that publishes them. Everything below was built in M1b (round 7) and confirmed by the owner on 2026-11-19 (`docs/plans/round-7.md`).
 
 ## Format
 

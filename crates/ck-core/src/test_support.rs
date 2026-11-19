@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Held by a test while it spawns a child, and by a test that needs a closed
 /// file lock to be free at once. Between fork and exec a Unix child holds
@@ -20,12 +21,26 @@ pub(crate) fn spawn_guard() -> MutexGuard<'static, ()> {
 pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
+    /// Creates a new private folder. It fails rather than reuse a folder
+    /// that already exists, which another user could have planted.
     pub(crate) fn new(tag: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("ck-sup-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("ck-sup-{tag}-{}-{nanos}-{n}", std::process::id()));
+        #[cfg(unix)]
+        let builder = {
+            let mut builder = std::fs::DirBuilder::new();
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
+        builder.create(&path).unwrap();
         Self(path)
     }
 

@@ -197,39 +197,3 @@ pub fn status_table(services: &[ServiceStatus]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-
-#[cfg(test)]
-mod tests {
-    use ck_core::service::ServiceId;
-
-    use super::*;
-
-    fn service(id: &str, state: ServiceState, pid: Option<u32>, port: u16) -> ServiceStatus {
-        ServiceStatus {
-            id: ServiceId::new(id).unwrap(),
-            state,
-            pid,
-            port,
-            since: pid.map(|_| "2026-11-19T10:00:00Z".to_owned()),
-            adopted: false,
-            protected: false,
-            last_error: None,
-        }
-    }
-
-    #[test]
-    fn status_table_aligns_columns_without_trailing_spaces() {
-        let services = [
-            service("web", ServiceState::Running, Some(4242), 8900),
-            service("database", ServiceState::Stopped, None, 5432),
-        ];
-        let expected = [
-            "SERVICE   STATE    PID   PORT  SINCE",
-            "web       running  4242  8900  2026-11-19T10:00:00Z",
-            "database  stopped  -     5432  -",
-        ]
-        .join("\n");
-        assert_eq!(status_table(&services), expected);
-        assert_eq!(status_table(&[]), "SERVICE  STATE  PID  PORT  SINCE");
-    }
-}

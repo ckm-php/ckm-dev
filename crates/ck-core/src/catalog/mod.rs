@@ -6,8 +6,11 @@
 //! Under `state/catalog.lock` it compares the sequence with the stored state
 //! ([`state::decide`]), then writes the exact envelope bytes to
 //! `catalog/catalog.json` and then the new state, each with
-//! `layout::write_atomic`. A refused catalog leaves both files as they were,
-//! so the cached catalog stays in use while it is not below the floor.
+//! `layout::write_atomic`. The same sequence and payload again leaves the
+//! state alone, and rewrites `catalog.json` only when it is missing,
+//! unreadable, or holds other bytes with a sequence no higher than the
+//! offered one (a higher one is left by a failed state write). A refused catalog leaves both files as they were, so the
+//! cached catalog stays in use while it is not below the floor.
 //!
 //! Every function here expects `layout::ensure` to have created the data
 //! folders. App code passes [`Trust::release`]; tests pass their own keys.
@@ -55,11 +58,6 @@ impl Catalog {
 
     pub fn runtimes(&self) -> &[Runtime] {
         &self.payload.runtimes
-    }
-
-    /// The SHA-256 of the decoded payload bytes.
-    pub fn payload_sha256(&self) -> &Sha256Digest {
-        &self.payload_sha256
     }
 
     /// The artifact of `name` `version` for `platform`.
@@ -117,7 +115,25 @@ pub fn accept(paths: &Paths, trust: &Trust, bytes: &[u8], now: SystemTime) -> Re
             layout::write_atomic(&paths.catalog_file(), bytes)?;
             state::write(paths, &offered)?;
         }
-        Decision::Unchanged => {}
+        // Repairs a cache that was deleted, unreadable, or holding the same
+        // payload in another envelope (such as one signed by a key a later
+        // release drops). A cache with a higher sequence is kept: it is left
+        // when a state write fails after its catalog write.
+        Decision::Unchanged => {
+            let path = paths.catalog_file();
+            let repair = match fs::read(&path) {
+                Ok(on_disk) => {
+                    on_disk != bytes
+                        && !check(&on_disk, trust)
+                            .is_ok_and(|cache| cache.sequence() > catalog.sequence())
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+                Err(e) => return Err(Error::io("read", path, e)),
+            };
+            if repair {
+                layout::write_atomic(&path, bytes)?;
+            }
+        }
     }
     Ok(catalog)
 }
@@ -142,18 +158,13 @@ pub fn cached(paths: &Paths, trust: &Trust) -> Result<Option<Catalog>> {
         Err(e) => return Err(Error::io("read", path, e)),
     };
     let catalog = check(&bytes, trust)?;
-    if let Some(stored) = stored
-        && catalog.sequence() < stored.sequence
-    {
+    let current = stored.map_or(trust.min_sequence(), |stored| {
+        stored.sequence.max(trust.min_sequence())
+    });
+    if catalog.sequence() < current {
         return Err(Error::CatalogOutdated {
             offered: catalog.sequence(),
-            current: stored.sequence,
-        });
-    }
-    if catalog.sequence() < trust.min_sequence() {
-        return Err(Error::CatalogOutdated {
-            offered: catalog.sequence(),
-            current: trust.min_sequence(),
+            current,
         });
     }
     Ok(Some(catalog))
@@ -162,7 +173,8 @@ pub fn cached(paths: &Paths, trust: &Trust) -> Result<Option<Catalog>> {
 /// Fetches the envelope at `url` through `transport`, under
 /// `TransportPolicy::current(paths.profile)`, at most
 /// [`envelope::MAX_CATALOG_BYTES`] and within [`CATALOG_TIMEOUT`], then
-/// [`accept`]s it. When it fails, the cached catalog stays in use.
+/// [`accept`]s it. When it fails, the cached catalog stays in use while it is
+/// not below the floor.
 pub fn refresh(
     paths: &Paths,
     trust: &Trust,
@@ -336,6 +348,26 @@ mod tests {
             ("an unsupported CPU", |p: &mut Value| {
                 p["runtimes"][0]["artifacts"][0]["arch"] = json!("riscv64");
             }),
+            ("an empty licence", |p: &mut Value| {
+                p["runtimes"][0]["license"] = json!("");
+            }),
+            ("a licence over 128 bytes", |p: &mut Value| {
+                p["runtimes"][0]["license"] = json!("M".repeat(129));
+            }),
+            ("a licence with a control character", |p: &mut Value| {
+                p["runtimes"][0]["license"] = json!("MIT\u{1b}[2J");
+            }),
+            ("a URL over 2048 bytes", |p: &mut Value| {
+                let long = format!("{URL}?{}", "a".repeat(2048));
+                p["runtimes"][0]["artifacts"][0]["url"] = json!(long);
+            }),
+            ("a URL that needs correcting", |p: &mut Value| {
+                p["runtimes"][0]["artifacts"][0]["url"] =
+                    json!("https://github.com\\example\\php.tar.gz");
+            }),
+            ("a URL that does not parse", |p: &mut Value| {
+                p["runtimes"][0]["artifacts"][0]["url"] = json!("not a url");
+            }),
             ("an unsupported format", |p: &mut Value| {
                 p["runtimes"][0]["artifacts"][0]["format"] = json!("tar.xz");
             }),
@@ -415,7 +447,9 @@ mod tests {
             })
         );
 
-        // The same payload in other envelope bytes: accepted, nothing written.
+        // The same payload in other envelope bytes: accepted, and the cache
+        // takes the new envelope; the state is untouched.
+        let state_five = fs::read(paths.catalog_state_file()).unwrap();
         let five_again = signed(&second, &payload_five);
         assert_ne!(five_again, five);
         assert_eq!(
@@ -424,7 +458,8 @@ mod tests {
                 .sequence(),
             5
         );
-        assert_eq!(fs::read(paths.catalog_file()).unwrap(), five);
+        assert_eq!(fs::read(paths.catalog_file()).unwrap(), five_again);
+        assert_eq!(fs::read(paths.catalog_state_file()).unwrap(), state_five);
 
         // The same sequence with other contents.
         let five_other = signed(&first, &test_signing::payload(5, EXPIRES + 1, php()));
@@ -433,7 +468,7 @@ mod tests {
             matches!(result, Err(Error::CatalogConflict { sequence: 5 })),
             "{result:?}"
         );
-        assert_eq!(fs::read(paths.catalog_file()).unwrap(), five);
+        assert_eq!(fs::read(paths.catalog_file()).unwrap(), five_again);
 
         // A higher sequence.
         let six = php_catalog(&first, 6);
@@ -532,6 +567,39 @@ mod tests {
                 .map(|catalog| catalog.sequence()),
             Some(10)
         );
+    }
+
+    #[test]
+    fn a_deleted_cache_is_repaired_by_the_same_catalog_and_the_state_is_kept() {
+        let root = TempDir::new("catalog");
+        let paths = ensured(&root);
+        let key = TestKey::generate();
+        let trust = trusting(&[&key], 0);
+        let five = php_catalog(&key, 5);
+        accept(&paths, &trust, &five, at(NOW)).unwrap();
+        let state_five = fs::read(paths.catalog_state_file()).unwrap();
+
+        fs::remove_file(paths.catalog_file()).unwrap();
+        assert!(cached(&paths, &trust).unwrap().is_none());
+
+        assert_eq!(
+            accept(&paths, &trust, &five, at(NOW)).unwrap().sequence(),
+            5
+        );
+        assert_eq!(fs::read(paths.catalog_file()).unwrap(), five);
+        assert_eq!(fs::read(paths.catalog_state_file()).unwrap(), state_five);
+        assert_eq!(
+            cached(&paths, &trust)
+                .unwrap()
+                .map(|catalog| catalog.sequence()),
+            Some(5)
+        );
+
+        // A newer cache left by a failed state write is never replaced.
+        let six = php_catalog(&key, 6);
+        fs::write(paths.catalog_file(), &six).unwrap();
+        accept(&paths, &trust, &five, at(NOW)).unwrap();
+        assert_eq!(fs::read(paths.catalog_file()).unwrap(), six);
     }
 
     #[test]

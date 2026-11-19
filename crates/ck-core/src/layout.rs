@@ -16,7 +16,7 @@
 //! <data>/runtimes/.staging/<name>-<version>.<pid>.<n>/   an unpack or removal in progress
 //! ```
 //!
-//! On Unix, folders are 0700 and files 0600. On Windows the data folder gets a
+//! On Unix, folders are 0700 and files 0600. On Windows the data folder keeps a
 //! protected DACL (`ck_sys::windows::make_private_dir`) that everything inside
 //! inherits.
 
@@ -208,10 +208,11 @@ fn unique_name(name: &RuntimeName, version: &RuntimeVersion) -> String {
 /// Creates the folder tree privately, or checks and tightens an existing one.
 ///
 /// On Unix the data folder is set to 0700 at every call, and a data folder
-/// owned by another uid is refused. `run/` must be a real directory (not a
-/// link), owned by this user, with mode 0700. Breaking a rule gives
-/// [`Error::NotPrivate`](crate::Error::NotPrivate). On Windows the protected
-/// DACL is set once, when this call creates the data folder.
+/// owned by another uid is refused. Every folder inside must be a real
+/// directory (not a link), owned by this user, with mode 0700; each is checked
+/// before anything is created inside it. On Windows the data folder must keep
+/// its protected DACL: it is re-applied when this user owns the folder and has
+/// lost it. Breaking a rule gives [`Error::NotPrivate`](crate::Error::NotPrivate).
 ///
 /// The supervisor and `client::ensure` call it; `ck paths` never does.
 pub fn ensure(paths: &Paths) -> Result<()> {
@@ -222,12 +223,10 @@ pub fn ensure(paths: &Paths) -> Result<()> {
     let created = create_dir_if_missing(data)?;
     sys::secure_root(data, created)?;
 
-    // Checked before anything is created inside it.
-    let run = paths.run_dir();
-    create_private_dir(&run)?;
-    sys::check_run_dir(&run)?;
-
+    // Parents come before their children, so a planted link is refused
+    // before anything is created through it.
     for dir in [
+        paths.run_dir(),
         paths.records_dir(),
         paths.logs_dir(),
         paths.service_logs_dir(),
@@ -238,6 +237,9 @@ pub fn ensure(paths: &Paths) -> Result<()> {
         paths.staging_dir(),
     ] {
         create_private_dir(&dir)?;
+        // Windows folders inherit the data folder's protected DACL instead.
+        #[cfg(unix)]
+        check_private_dir(&dir)?;
     }
     Ok(())
 }
@@ -375,13 +377,10 @@ mod unix {
         Ok(())
     }
 
-    pub(super) fn check_run_dir(run: &Path) -> Result<()> {
-        check_private_dir(run)
-    }
-
     /// Checks with `lstat` that `path` is a real folder (not a link), owned by
-    /// this user, with mode exactly 0700. Used for `run/` and for the `/tmp`
-    /// folder that holds the socket when the data path is too long.
+    /// this user, with mode exactly 0700. Used for every folder inside the
+    /// data folder and for the `/tmp` folder that holds the socket when the
+    /// data path is too long.
     pub(crate) fn check_private_dir(path: &Path) -> Result<()> {
         let meta = fs::symlink_metadata(path).map_err(|e| Error::io("inspect", path, e))?;
         match private_dir_problem(&meta, ck_sys::unix::effective_uid()) {
@@ -423,7 +422,7 @@ mod unix {
 
 #[cfg(windows)]
 mod windows {
-    use std::fs::{DirBuilder, OpenOptions};
+    use std::fs::{self, DirBuilder, OpenOptions};
     use std::path::Path;
 
     use crate::error::{Error, Result};
@@ -436,24 +435,38 @@ mod windows {
         OpenOptions::new()
     }
 
-    /// Sets the protected DACL (current user, SYSTEM, Administrators) that
-    /// every file and folder inside inherits, only when `ensure` has just
-    /// created the data folder.
+    /// Gives the data folder the protected DACL (current user, SYSTEM,
+    /// Administrators) that every file and folder inside inherits.
     ///
-    /// `make_private_dir` re-applies the DACL to every existing child, which
-    /// is slow on a big tree, so it does not run at every start. Nothing is
-    /// inside the folder yet when it does, so every child inherits the DACL.
+    /// A folder this call created gets it at once; if that fails, the empty
+    /// folder is removed so the next start creates it again. An existing
+    /// folder is checked at every start: one this user owns gets the DACL
+    /// again (as Unix re-applies 0700), and one another account owns is
+    /// refused. `make_private_dir` re-applies the DACL to every child, which
+    /// is slow on a big tree, so it runs only when the folder is not private.
     pub(super) fn secure_root(data: &Path, created: bool) -> Result<()> {
-        if !created {
+        if created {
+            return ck_sys::windows::make_private_dir(data).map_err(|e| {
+                // Best effort: the DACL error is the one worth reporting.
+                let _ = fs::remove_dir(data);
+                Error::io("restrict access to", data, e)
+            });
+        }
+        let private = ck_sys::windows::is_private_dir(data)
+            .map_err(|e| Error::io("read the access rules of", data, e))?;
+        if private {
             return Ok(());
+        }
+        let owned = ck_sys::windows::is_owned_by_current_user(data)
+            .map_err(|e| Error::io("read the owner of", data, e))?;
+        if !owned {
+            return Err(Error::NotPrivate {
+                path: data.to_path_buf(),
+                reason: "it belongs to another account".to_owned(),
+            });
         }
         ck_sys::windows::make_private_dir(data)
             .map_err(|e| Error::io("restrict access to", data, e))
-    }
-
-    /// Nothing to check: `run/` inherits the data folder's protected DACL.
-    pub(super) fn check_run_dir(_run: &Path) -> Result<()> {
-        Ok(())
     }
 }
 
@@ -487,6 +500,21 @@ mod tests {
             #[cfg(windows)]
             assert!(dir.is_dir(), "{}", dir.display());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_refuses_a_planted_link_inside_the_data_folder() {
+        let root = TempDir::new("layout");
+        let paths = profile(&root);
+        let elsewhere = root.path().join("elsewhere");
+        create_private_dir(&elsewhere).unwrap();
+        create_private_dir(&paths.data).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, paths.logs_dir()).unwrap();
+
+        assert!(matches!(ensure(&paths), Err(Error::NotPrivate { .. })));
+        // Nothing was created through the link.
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
     #[test]

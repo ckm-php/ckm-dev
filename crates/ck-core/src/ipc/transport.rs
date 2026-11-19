@@ -1,10 +1,11 @@
 //! The listening and connected ends of the IPC, the same API on every OS.
 //!
 //! - **Unix:** a tokio Unix socket, 0600 inside a 0700 folder. Both ends
-//!   compare `peer_cred().uid()` with `ck_sys::unix::effective_uid()`.
+//!   compare `peer_cred().uid()` with `ck_sys::unix::effective_uid()`, and a
+//!   client checks a `/tmp` fallback folder before it connects.
 //! - **Windows:** a tokio named pipe made by `ck_sys::windows::private_pipe_server`.
-//!   The server checks the client's token SID and the client checks the
-//!   server's.
+//!   The server checks the client's token SID; the client checks the server's
+//!   and that the current user owns the pipe.
 //!
 //! Clients never delete a socket. "Not found" or "connection refused" means no
 //! supervisor is running.
@@ -74,6 +75,8 @@ impl Connection {
     ///
     /// No listener gives
     /// [`Error::SupervisorUnavailable`](crate::Error::SupervisorUnavailable).
+    /// On Unix a `/tmp` fallback folder that is not private gives
+    /// [`Error::NotPrivate`](crate::Error::NotPrivate) before connecting.
     pub async fn open(endpoint: &Endpoint) -> Result<Self> {
         sys::connect(endpoint).await.map(|stream| Self { stream })
     }
@@ -241,6 +244,9 @@ mod unix {
     }
 
     pub(super) async fn connect(endpoint: &Endpoint) -> Result<Stream> {
+        if let Some(dir) = &endpoint.fallback_dir {
+            check_fallback_dir(dir)?;
+        }
         let stream = match UnixStream::connect(&endpoint.address).await {
             Ok(stream) => stream,
             Err(e)
@@ -283,6 +289,23 @@ mod unix {
         } else {
             Err(Error::PeerRejected)
         }
+    }
+
+    /// The client's check of the `/tmp` folder before it connects through
+    /// it: a missing folder means no supervisor; a link, or a folder another
+    /// user owns or may enter, is refused, so the client never talks to a
+    /// socket someone else planted.
+    ///
+    /// Absence is judged after a failed check, so a folder that a stopping
+    /// supervisor removes during the check still means "not running".
+    fn check_fallback_dir(dir: &Path) -> Result<()> {
+        let checked = layout::check_private_dir(dir);
+        if checked.is_err()
+            && fs::symlink_metadata(dir).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+        {
+            return Err(super::not_running());
+        }
+        checked
     }
 
     /// Creates the `/tmp` folder for a long data path (0700), or reuses it,
@@ -503,7 +526,6 @@ mod tests {
         use std::fs;
         use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
         use std::path::{Path, PathBuf};
-        use std::sync::atomic::{AtomicUsize, Ordering};
 
         use serde_json::{Value, json};
 
@@ -511,35 +533,33 @@ mod tests {
         use super::super::*;
         use crate::layout;
         use crate::paths::{Paths, Profile};
+        use crate::test_support::TempDir;
 
-        /// A folder under the system temp folder. On drop it is removed with
-        /// everything inside, along with any `/tmp` socket folder a test
-        /// endpoint used.
+        /// A temporary folder that also removes, on drop, any `/tmp` socket
+        /// folder a test endpoint used.
         struct Scratch {
-            root: PathBuf,
+            root: TempDir,
             fallback_dirs: Vec<PathBuf>,
         }
 
         impl Scratch {
             fn new(tag: &str) -> Self {
-                static NEXT: AtomicUsize = AtomicUsize::new(0);
-                let n = NEXT.fetch_add(1, Ordering::Relaxed);
-                let root =
-                    std::env::temp_dir().join(format!("ck-{tag}-{}-{n}", std::process::id()));
-                let _ = fs::remove_dir_all(&root);
-                fs::create_dir(&root).unwrap();
                 Self {
-                    root,
+                    root: TempDir::new(tag),
                     fallback_dirs: Vec::new(),
                 }
+            }
+
+            fn path(&self) -> &Path {
+                self.root.path()
             }
 
             /// Lays out a profile whose data folder is `<root>/<name>` and
             /// returns its endpoint.
             fn endpoint(&mut self, name: &str) -> Endpoint {
                 let paths = Paths {
-                    home: self.root.clone(),
-                    data: self.root.join(name),
+                    home: self.path().to_path_buf(),
+                    data: self.path().join(name),
                     profile: Profile::Isolated,
                 };
                 layout::ensure(&paths).unwrap();
@@ -552,7 +572,7 @@ mod tests {
 
         impl Drop for Scratch {
             fn drop(&mut self) {
-                for dir in self.fallback_dirs.iter().chain([&self.root]) {
+                for dir in &self.fallback_dirs {
                     let _ = fs::remove_dir_all(dir);
                 }
             }
@@ -624,13 +644,13 @@ mod tests {
         fn a_fallback_folder_must_be_a_real_private_folder() {
             let scratch = Scratch::new("fallback");
 
-            let fresh = scratch.root.join("fresh");
+            let fresh = scratch.path().join("fresh");
             prepare_fallback_dir(&fresh).unwrap();
             assert_eq!(mode(&fresh), 0o700);
             prepare_fallback_dir(&fresh).unwrap();
 
             // A link is refused even when it points at a private folder.
-            let link = scratch.root.join("link");
+            let link = scratch.path().join("link");
             symlink(&fresh, &link).unwrap();
             assert!(matches!(
                 prepare_fallback_dir(&link),
@@ -638,7 +658,7 @@ mod tests {
             ));
 
             // A folder others can enter is refused, and left unchanged.
-            let open = scratch.root.join("open");
+            let open = scratch.path().join("open");
             fs::create_dir(&open).unwrap();
             fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
             assert!(matches!(
@@ -646,6 +666,41 @@ mod tests {
                 Err(Error::NotPrivate { .. })
             ));
             assert_eq!(mode(&open), 0o755);
+        }
+
+        #[tokio::test]
+        async fn a_client_checks_the_fallback_folder_before_connecting() {
+            let scratch = Scratch::new("client-fallback");
+            // Built by hand: these folders are short enough that `locate`
+            // would never choose a fallback for them.
+            let at = |dir: &Path| Endpoint {
+                data: scratch.path().join("d"),
+                address: dir.join("ck.sock"),
+                fallback_dir: Some(dir.to_path_buf()),
+            };
+
+            let missing = scratch.path().join("missing");
+            assert!(matches!(
+                Connection::open(&at(&missing)).await,
+                Err(Error::SupervisorUnavailable { .. })
+            ));
+
+            let open = scratch.path().join("open");
+            fs::create_dir(&open).unwrap();
+            fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(matches!(
+                Connection::open(&at(&open)).await,
+                Err(Error::NotPrivate { .. })
+            ));
+
+            let private = scratch.path().join("private");
+            prepare_fallback_dir(&private).unwrap();
+            let link = scratch.path().join("link");
+            symlink(&private, &link).unwrap();
+            assert!(matches!(
+                Connection::open(&at(&link)).await,
+                Err(Error::NotPrivate { .. })
+            ));
         }
     }
 }

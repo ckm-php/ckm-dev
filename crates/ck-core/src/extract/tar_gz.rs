@@ -27,7 +27,7 @@ use tar::{Archive, Entry, EntryType, Header};
 
 use super::names::EntryPath;
 use super::{Tree, archive_refused, refused};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, escape_untrusted};
 
 /// The most bytes in one GNU long name or long link, or one PAX header.
 const MAX_EXTENSION_BYTES: u64 = 64 * 1024;
@@ -100,8 +100,15 @@ fn unpack_entry<R: Read>(
     match kind {
         EntryType::Regular => {
             let path = parse_non_folder(&name, "file")?;
-            let mode =
-                mode.map_err(|e| refused(&name, format!("has a mode that cannot be read: {e}")))?;
+            let mode = mode.map_err(|e| {
+                refused(
+                    &name,
+                    format!(
+                        "has a mode that cannot be read: {}",
+                        escape_untrusted(&e.to_string())
+                    ),
+                )
+            })?;
             tree.file(&path, mode & 0o111 != 0, size, entry)
         }
         EntryType::Directory => {
@@ -189,7 +196,10 @@ fn set_once<T>(slot: &mut Option<T>, value: T, what: &str) -> Result<()> {
 }
 
 fn unreadable(error: io::Error) -> Error {
-    archive_refused(format!("it cannot be read as tar.gz: {error}"))
+    archive_refused(format!(
+        "it cannot be read as tar.gz: {}",
+        escape_untrusted(&error.to_string())
+    ))
 }
 
 /// The extension headers read since the last entry, which describe the next.

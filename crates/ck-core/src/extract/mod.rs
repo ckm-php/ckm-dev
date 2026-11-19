@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use self::names::EntryPath;
 use crate::catalog::schema::ArchiveFormat;
 use crate::download::verified::VerifiedFile;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, escape_untrusted};
 
 /// The most entries one archive may hold.
 pub const MAX_ENTRIES: u64 = 100_000;
@@ -55,7 +55,7 @@ const COPY_BUFFER_BYTES: usize = 64 * 1024;
 /// inside it. On any failure `dest` is removed, and nothing is written outside
 /// it. `archive` is dropped either way, which removes its file. A broken rule
 /// gives [`Error::ArchiveEntryRefused`] or [`Error::ArchiveRefused`].
-pub fn unpack(archive: VerifiedFile, dest: &Path) -> Result<()> {
+pub(crate) fn unpack(archive: VerifiedFile, dest: &Path) -> Result<()> {
     unpack_with(archive, dest, Limits::DEFAULT)
 }
 
@@ -145,6 +145,9 @@ impl Link {
                 ),
             )
         };
+        if raw.is_empty() {
+            return Err(refuse("is empty"));
+        }
         if raw.len() > names::MAX_PATH_BYTES {
             return Err(refuse("is too long"));
         }
@@ -317,7 +320,7 @@ impl<'a> Tree<'a> {
                 Err(e) => {
                     return Err(refused(
                         path.as_str().as_bytes(),
-                        format!("cannot be read: {e}"),
+                        format!("cannot be read: {}", escape_untrusted(&e.to_string())),
                     ));
                 }
             };

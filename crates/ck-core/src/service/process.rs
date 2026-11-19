@@ -49,9 +49,9 @@ const INHERITED_VARS: [&str; 4] = ["PATH", "TEMP", "TMP", "SystemRoot"];
 /// Set to the profile's home folder, so the services of a test profile stay
 /// inside it.
 #[cfg(unix)]
-const HOME_VAR: &str = "HOME";
+const OS_HOME_VAR: &str = "HOME";
 #[cfg(windows)]
-const HOME_VAR: &str = "USERPROFILE";
+const OS_HOME_VAR: &str = "USERPROFILE";
 
 /// Fails with `port_in_use` when something already holds `127.0.0.1:port`.
 /// The port is never changed.
@@ -112,7 +112,7 @@ fn prepare(command: &mut Command, spec: &ServiceSpec, paths: &Paths) -> Result<(
                 .iter()
                 .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
         )
-        .env(HOME_VAR, &paths.home)
+        .env(OS_HOME_VAR, &paths.home)
         .envs(
             spec.env
                 .iter()

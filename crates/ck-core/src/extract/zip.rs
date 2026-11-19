@@ -29,7 +29,7 @@ use ::zip::{CompressionMethod, ZipArchive};
 
 use super::names::{EntryPath, MAX_PATH_BYTES};
 use super::{Kind, Tree, archive_refused, refused};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, escape_untrusted};
 
 const TYPE_MASK: u32 = 0o170000;
 const TYPE_FILE: u32 = 0o100000;
@@ -149,7 +149,12 @@ impl Meta {
             .map_err(|e| self.unreadable(&e))?
             .take(cap + 1)
             .read_to_end(&mut target)
-            .map_err(|e| refused(&self.name, format!("cannot be read: {e}")))?;
+            .map_err(|e| {
+                refused(
+                    &self.name,
+                    format!("cannot be read: {}", escape_untrusted(&e.to_string())),
+                )
+            })?;
         if target.len() as u64 != self.size {
             return Err(refused(
                 &self.name,
@@ -164,10 +169,16 @@ impl Meta {
     }
 
     fn unreadable(&self, error: &ZipError) -> Error {
-        refused(&self.name, format!("cannot be read: {error}"))
+        refused(
+            &self.name,
+            format!("cannot be read: {}", escape_untrusted(&error.to_string())),
+        )
     }
 }
 
 fn invalid(error: ZipError) -> Error {
-    archive_refused(format!("it is not a valid zip: {error}"))
+    archive_refused(format!(
+        "it is not a valid zip: {}",
+        escape_untrusted(&error.to_string())
+    ))
 }

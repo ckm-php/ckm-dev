@@ -21,7 +21,6 @@
 
 use std::cell::Cell;
 use std::fs::File;
-use std::hint::black_box;
 use std::io::{self, ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
 
@@ -54,7 +53,7 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// folder ([`Error::NotPrivate`]).
 ///
 /// The caller holds the version's lock (`Paths::runtime_lock_file`).
-pub fn fetch_artifact(
+pub(crate) fn fetch_artifact(
     transport: &dyn Transport,
     policy: &TransportPolicy,
     paths: &Paths,
@@ -67,7 +66,7 @@ pub fn fetch_artifact(
     #[cfg(unix)]
     layout::check_private_dir(&paths.downloads_dir())?;
 
-    let first = parse_first(&artifact.url)?;
+    let first = parse_strict_url(&artifact.url)?;
     let shown = redact(&first);
     let (_, response) = follow(transport, policy, &first, None)?;
     if let Some(announced) = response.content_length
@@ -95,7 +94,6 @@ pub fn fetch_artifact(
             file,
             part,
             format: artifact.format,
-            size: artifact.size,
         }),
         Err(error) => {
             // The handle closes before the file is removed, which Windows needs.
@@ -109,14 +107,14 @@ pub fn fetch_artifact(
 /// Fetches `url` into memory: at most `max_bytes`, and within
 /// `total_timeout` for all hops together. For the catalog, whose signature is
 /// checked afterwards instead of a pin. More bytes than `max_bytes` fails.
-pub fn fetch_bytes(
+pub(crate) fn fetch_bytes(
     transport: &dyn Transport,
     policy: &TransportPolicy,
     url: &str,
     max_bytes: usize,
     total_timeout: Duration,
 ) -> Result<Vec<u8>> {
-    let first = parse_first(url)?;
+    let first = parse_strict_url(url)?;
     let budget = Budget {
         started: Instant::now(),
         total: total_timeout,
@@ -233,8 +231,9 @@ fn write_checked(
         )));
     }
 
+    // Both digests are public, so a plain comparison is enough.
     let actual: [u8; 32] = hasher.finalize().into();
-    if !digests_match(&actual, artifact.sha256.as_bytes()) {
+    if actual != *artifact.sha256.as_bytes() {
         return Err(Error::ChecksumMismatch {
             url: shown.to_owned(),
             expected: artifact.sha256.to_string(),
@@ -242,16 +241,6 @@ fn write_checked(
         });
     }
     Ok(())
-}
-
-/// Compares every byte whatever differs, so the time taken does not show
-/// where two digests part.
-fn digests_match(actual: &[u8; 32], expected: &[u8; 32]) -> bool {
-    let mut difference = 0;
-    for (a, b) in actual.iter().zip(expected) {
-        difference |= black_box(a ^ b);
-    }
-    difference == 0
 }
 
 /// A limit on all the hops of one fetch together.
@@ -320,7 +309,10 @@ fn parse_strict(text: &str, base: Option<&Url>) -> Result<Url, Unparsed> {
     }
 }
 
-fn parse_first(text: &str) -> Result<Url> {
+/// A first URL, parsed as strictly as every hop: the catalog checks its
+/// artifact URLs with this when it is parsed. [`Error::UrlRefused`] names it
+/// only by its redacted form.
+pub(crate) fn parse_strict_url(text: &str) -> Result<Url> {
     parse_strict(text, None).map_err(|unparsed| unparsed.refused("the download URL".to_owned()))
 }
 
@@ -705,10 +697,7 @@ mod tests {
         let transport = github(FakeReply::ok(body.clone()));
 
         let mut verified = download(&transport, &paths, &pinned(&body)).unwrap();
-        assert_eq!(
-            (verified.format(), verified.size()),
-            (ArchiveFormat::TarGz, body.len() as u64)
-        );
+        assert_eq!(verified.format(), ArchiveFormat::TarGz);
         // Artifacts have no total timeout: the pinned size bounds them.
         let requests: Vec<_> = transport
             .requests()

@@ -34,7 +34,8 @@ pub struct CatalogState {
 pub enum Decision {
     /// Write the catalog and the new state.
     Store,
-    /// The same catalog as the stored one: write nothing.
+    /// The same catalog as the stored one: keep the state. `accept` repairs
+    /// the cached catalog, but never replaces one with a higher sequence.
     Unchanged,
 }
 

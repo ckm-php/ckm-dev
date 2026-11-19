@@ -62,7 +62,7 @@ pub trait Transport: Send + Sync {
 }
 
 #[cfg(test)]
-pub(crate) use self::fake::{FakeReply, FakeRequest, FakeTransport};
+pub(crate) use self::fake::{FakeReply, FakeTransport};
 
 #[cfg(test)]
 mod fake {
@@ -72,8 +72,7 @@ mod fake {
     use std::time::Duration;
 
     use super::{Request, Response, Transport};
-    use crate::download::policy::redact;
-    use crate::error::{Error, Result};
+    use crate::error::Result;
 
     /// Replies scripted by URL. A URL with no reply gets a 404. Every request
     /// is recorded, so a test can tell what was never requested.
@@ -92,8 +91,6 @@ mod fake {
         pub(crate) body: Vec<u8>,
         /// After `body`, the reader fails with this instead of ending.
         pub(crate) body_error: Option<io::ErrorKind>,
-        /// When set, the request itself fails with this reason.
-        pub(crate) fail: Option<String>,
     }
 
     impl FakeReply {
@@ -105,7 +102,6 @@ mod fake {
                 content_length: Some(body.len() as u64),
                 body,
                 body_error: None,
-                fail: None,
             }
         }
 
@@ -167,12 +163,6 @@ mod fake {
                     status: 404,
                     ..FakeReply::ok(Vec::new())
                 });
-            if let Some(reason) = reply.fail {
-                return Err(Error::DownloadFailed {
-                    url: redact(request.url),
-                    reason,
-                });
-            }
             Ok(Response {
                 status: reply.status,
                 location: reply.location,
@@ -197,89 +187,5 @@ mod fake {
                 (read, _) => Ok(read),
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::{ErrorKind, Read};
-
-    use super::*;
-
-    fn get(transport: &FakeTransport, url: &str) -> Response {
-        let url = Url::parse(url).unwrap();
-        transport
-            .get(&Request {
-                url: &url,
-                total_timeout: Some(CATALOG_TIMEOUT),
-            })
-            .unwrap()
-    }
-
-    #[test]
-    fn the_fake_replays_its_script_and_records_each_request() {
-        let transport = FakeTransport::new();
-        transport.reply("https://github.com/a", FakeReply::ok(b"abc".to_vec()));
-        transport.reply(
-            "https://github.com/b",
-            FakeReply::redirect(302, "https://objects.githubusercontent.com/c"),
-        );
-        transport.reply(
-            "https://github.com/stall",
-            FakeReply {
-                body_error: Some(ErrorKind::TimedOut),
-                ..FakeReply::ok(b"x".to_vec())
-            },
-        );
-        transport.reply(
-            "https://github.com/down",
-            FakeReply {
-                fail: Some("connection refused".to_owned()),
-                ..FakeReply::ok(Vec::new())
-            },
-        );
-
-        let mut ok = get(&transport, "https://github.com/a");
-        assert_eq!((ok.status, ok.content_length), (200, Some(3)));
-        let mut body = Vec::new();
-        ok.body.read_to_end(&mut body).unwrap();
-        assert_eq!(body, b"abc");
-
-        let redirect = get(&transport, "https://github.com/b");
-        assert_eq!(redirect.status, 302);
-        assert_eq!(
-            redirect.location.as_deref(),
-            Some("https://objects.githubusercontent.com/c")
-        );
-
-        let mut stall = get(&transport, "https://github.com/stall");
-        let mut first = [0; 8];
-        assert_eq!(stall.body.read(&mut first).unwrap(), 1);
-        let error = stall.body.read(&mut first).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::TimedOut);
-
-        assert_eq!(get(&transport, "https://github.com/none").status, 404);
-
-        let url = Url::parse("https://github.com/down").unwrap();
-        let failed = transport.get(&Request {
-            url: &url,
-            total_timeout: None,
-        });
-        assert!(matches!(failed, Err(crate::Error::DownloadFailed { .. })));
-
-        let request = |url: &str, total_timeout| FakeRequest {
-            url: url.to_owned(),
-            total_timeout,
-        };
-        assert_eq!(
-            transport.requests(),
-            [
-                request("https://github.com/a", Some(CATALOG_TIMEOUT)),
-                request("https://github.com/b", Some(CATALOG_TIMEOUT)),
-                request("https://github.com/stall", Some(CATALOG_TIMEOUT)),
-                request("https://github.com/none", Some(CATALOG_TIMEOUT)),
-                request("https://github.com/down", None),
-            ]
-        );
     }
 }
