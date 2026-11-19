@@ -215,6 +215,13 @@ ck_audit_strings() {
     1) hits= ;;
     *) ck_die "grep failed on $file" ;;
   esac
+  case "$file" in
+    */ext/fileinfo.so)
+      # libmagic's built-in database describes these paths as text to
+      # match; they are data, not where anything was built.
+      hits=$(printf '%s\n' "$hits" | LC_ALL=C grep -v -x -E '/nix/store/|/usr/local') || true
+      ;;
+  esac
   if [ -n "$hits" ]; then
     ck_audit_fail "$file holds build paths: ${hits//"$CK_AUDIT_NL"/ }"
   fi
