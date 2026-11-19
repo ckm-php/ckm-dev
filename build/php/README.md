@@ -57,16 +57,20 @@ bin/php  bin/php-fpm  bin/php-cgi
 ext/<name>.so            shared extensions, in one flat folder
 lib/<soname>             bundled libraries, under their soname, no symlinks
 etc/php.ini-development  etc/php.ini-production  etc/ssl/cert.pem
-licenses/<component>/    the licence and notice of PHP and of each library
+licenses/<component>/    the licence and notice of PHP and of each library;
+                         licenses/php/ also holds README.REDIST.BINS
 ck-runtime.json          version, line, build revision, OS, CPU, thread safety,
                          module API, extension classes, each library's version
-                         and SHA256, baseline, toolchain
+                         and SHA256, baseline, toolchain, runner image
 ```
 
 - **Version:** `<php version>-ck<build revision>`, such as `8.5.12-ck1`. A rebuild of the same PHP raises the revision. A version folder is never overwritten.
 - **Thread safety:** NTS only.
 - **Linux:** `DT_RPATH` is `$ORIGIN/../lib` for `bin/` and `ext/`, and `$ORIGIN` for `lib/`. The only system libraries allowed are the glibc family, `libstdc++.so.6` and `libgcc_s.so.1`. PHP's bundled crypt is forced, so `libcrypt.so.1` is never linked.
 - **macOS:** `@rpath` install names with `@loader_path/../lib`, then an ad-hoc `codesign`. Only an explicit allow-list of `/usr/lib` libraries and system frameworks may be linked.
+- **Built-in extensions:** `php -n -m` lists exactly the line's `builtin` class, lower-cased, with `opcache` for `Zend OPcache`. The smoke stage checks it.
+- **Runner image:** `ck-runtime.json`'s `runner` is `<ImageOS>/<ImageVersion>` from the GitHub runner's variables, or `unknown` outside one.
+- **Build date:** the PHP stage sets `SOURCE_DATE_EPOCH` to the mtime of the pinned source's `main/php_version.h`, so a rebuild of the same pin bakes the same date. The library builds do not set it yet.
 - **Packing:** `ck-release pack` writes every folder and regular file sorted by path, with mtime 0, uid and gid 0, empty owner names, and mode 0755 (folders and executables) or 0644. It refuses links, special files and any name `ck_core::extract` would refuse. It runs on Linux and macOS only.
 
 ## Relocation contract
@@ -81,6 +85,46 @@ Nothing about the install location is baked in. The app (M3) passes it at run ti
 | FPM prefix, pid, log and socket | `php-fpm -p <dir> -y <conf> -c <ini> -F`                            |
 | CA bundle                       | `openssl.cafile` and `curl.cainfo` set to `<root>/etc/ssl/cert.pem` |
 | `include_path`                  | `include_path="."`; no PEAR, `php-config`, `phpize` or headers ship |
+
+**Baked paths.** The defaults read at every start point into a null folder that no account can create, so opening anything there gives `ENOENT`: `/proc/ck-dev-none` on Linux, `/System/ck-dev-none` on macOS (`ck_platform_null_dir`). They are OpenSSL's config folder (`<null>/ssl`, so no `openssl.cnf` is read) and PHP's ini path and scan folder (`<null>/php`, `<null>/php.d`). The audit requires these strings in `libcrypto` and `bin/php`. Under `/opt` it allows only these build-root strings, each matched whole, which are read only on demand, only when a setting above is missing, or never:
+
+- `/opt/ck-dev-build/`, from `-ffile-prefix-map`
+- `deps/<stack>/`: `lib/engines-<n>`, `lib/ossl-modules`, `etc/xml/catalog`, `bin/pkgconf`, `lib/pkgconfig`, `share/pkgconfig`, `include`
+- `php/<line>/prefix`, and under it `bin`, `sbin`, `etc`, `var`, `lib/php`, `lib/php/extensions/no-debug-non-zts-<api>`, `php/man`, `share/php`
+
+Every other string under `/opt` fails, as do home, temporary, `/usr/local` and `/nix/store` paths (except libmagic's text in `ext/fileinfo.so`). `tests/audit-selftest.sh` tests these rules. The audit also checks hardening. On Linux every ELF file needs `GNU_RELRO` and a non-executable `GNU_STACK`, and each `bin/` file must be a PIE. On macOS each `bin/` file must carry the `PIE` flag.
+
+## Workflows
+
+- **`php-build.yml` ("PHP build")** builds, audits, smoke-tests and packs each line on each OS. It then runs the contract install on a fresh runner and lays out the release set and an unsigned payload. Nothing is published. Its jobs:
+  - **`plan`** computes the matrix and uploads the `build-info` artifact (`build-info.json`: `commit`, `run_id`, `run_attempt`, `workflow`, `event`, `ref` and `clean`).
+  - **`lint`** runs shellcheck, `bash -n` and the three self-tests.
+  - **`tool`, `deps`, `php` and `contract`** build `ck-release`, the library stacks, PHP, and the contract install.
+  - **`payload`** merges the `php-*` artifacts into one flat folder, runs `release-set.sh` (with `--allow-partial` unless both OSes were built) and `ck-release payload build` (sequence 1, 90 days). It uploads the `release-set` and `catalog-payload-candidate` artifacts.
+- **Clean mode.** A dispatch with `clean=true` is the only run that can feed publishing (D25):
+  - It needs both OSes (`oses='linux macos'`).
+  - It restores and saves no `actions/cache` and no `rust-cache` in any job.
+  - It records `clean: true` in `build-info`.
+  - It runs in a concurrency group of its own and is never cancelled.
+
+  Pushes, pull requests and other dispatches are test runs and may use the caches. The run's artifacts (`build-info`, archives, `release-set`) are kept 7 days.
+
+- **`php-publish.yml` ("PHP publish")** publishes one clean candidate. It runs on dispatch only, with `run_id` and `commit` inputs.
+  - **`prepare`** (read-only) runs `release-check.sh`, then `release-set.sh --check`, `payload build` and `assets verify` on the candidate's `release-set`. It also checks each tag against the manifest's version and that no release or tag exists yet.
+  - **`publish`** needs the owner's approval in the `release` environment, and refuses unless that environment holds the variable `RELEASE_GATE=armed`. It attests the archives, creates draft releases at the commit, uploads, downloads and compares the files, and then publishes the drafts, which creates the tags last. After a failure it deletes only the drafts it made, by id; a published release is never touched.
+- **`catalog-check.yml` ("Catalog check")** runs `crates/ck-net/tests/published.rs` against what is published, on all three OSes.
+
+The owner's steps around these workflows are in `catalog/README.md`.
+
+## Self-tests
+
+They run in the PHP build's `lint` job and in `/verify`, with no network:
+
+| Script                            | Tests                                                                                                                           |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/fetch-selftest.sh`         | `lib/fetch.sh` and the pin refresh checks, with a stub `curl` and `ck-release`                                                  |
+| `tests/audit-selftest.sh`         | The audit's string rules (`ck_audit_strings`, `ck_audit_null_dir`) on synthetic object files                                    |
+| `tests/release-check-selftest.sh` | Every refusal of `release-check.sh` (fixtures in `tests/fixtures/release-check/`) and the layout and checks of `release-set.sh` |
 
 ## Frozen interfaces
 
@@ -112,8 +156,13 @@ ck-release lock [...] set <name> <version> --url <url> --sha256 <hex> --size <by
 ck-release pack <root> --out <file.tar.gz> --descriptor <file.json>
                 --name <name> --version <version> --os <linux|macos>
                 --cpu <x86_64|aarch64> --license <spdx>
-ck-release payload build --descriptors <dir> --base-url <url> --sequence <n>
-                         --expires <rfc3339> --out <file.json>
+ck-release payload build --releases <dir> --sequence <n> --expires <rfc3339>
+                         --out <file.json>
+ck-release assets verify --payload <file.json> --releases <dir>
+ck-release sign --payload <file.json> --key <file|-> --out <file.json>
+                (--previous <envelope.json> | --first)
+ck-release verify <envelope.json> [--payload <file.json>]
+ck-release key check --key <file|->
 ```
 
 - `--lock` and `--manifest` default to `catalog/sources.lock.json` and `catalog/php-lines.json` in the repository the tool was built from. Every `lock` command first loads and checks both files.
@@ -121,7 +170,33 @@ ck-release payload build --descriptors <dir> --base-url <url> --sequence <n>
 - `export` with `--stack` fails when a library the stack names a series for has no pin in it. With `--line` it fails when the line has no `php` pin.
 - `set` adds or replaces the entry with that name and version, checks both files, then replaces the lock atomically. It prints nothing.
 - `pack` requires the archive's file name to be `<name>-<version>-<os>-<cpu>.tar.gz`, and writes the descriptor.
-- `payload build` reads every `*.json` in `--descriptors`, and writes the unsigned payload in `ck-core`'s catalog schema 1 as two-space JSON. Each URL is `<base url>/<file>` and must pass the app's download policy (HTTPS on `github.com`).
+- `payload build` reads `--releases`: one folder per runtime release, named by its tag `<name>-<version>` (D25), holding what `gh release download <tag> -D <dir>/<tag>` writes: the archives, their descriptors and `SHA256SUMS`, and nothing else. It measures each archive's SHA256 and size, which must equal its descriptor and `SHA256SUMS`, and writes the unsigned payload in `ck-core`'s catalog schema 1 as two-space JSON with a trailing newline (the canonical form). Each URL is `<prefix><name>-<version>/<file>`, where the prefix is the release download folder of `ck-core`'s compiled `CATALOG_URL` (`https://github.com/ckm-php/ckm-dev/releases/download/`), and must pass the app's download policy (HTTPS on `github.com`). The old `--descriptors <dir> --base-url <url>` form is gone.
+- `assets verify` checks that every artifact in the payload matches `<releases>/<name>-<version>/<file>` by size and SHA256. It prints `ok: <n> artifacts match the release files`.
+- `sign` and `key check` refuse to run when `CI` or `GITHUB_ACTIONS` is set (to any value), before reading the key, and run on Linux and macOS only.
+  - `--key -` reads the key from stdin: the unencrypted PKCS#8 PEM that `openssl pkey -in <encrypted key>` prints, so the tool never sees the passphrase and the decrypted key never touches the disk. It refuses stdin that is a terminal, so a key is never typed or pasted. `--key <file>` is for throwaway test keys: a regular file (not a link) owned by the current user, mode 0600, outside this repository.
+  - The PEM must hold exactly one `PRIVATE KEY` block whose DER is the 16-byte Ed25519 prefix `302e020100300506032b657004220420` plus the 32-byte seed. Key material is never printed, and no error quotes it.
+- `sign` refuses, and writes nothing, unless: the payload parses with `ck-core`'s schema and is in canonical form; every URL is exactly where `payload build` puts it; the expiry is 7 to 100 days from now; the sequence is at least the compiled `MIN_SEQUENCE` (the app refuses a lower one as outdated); `--previous` verifies under the compiled keys and the new sequence is higher than its sequence, or with `--first` the output does not exist yet; and the new envelope verifies under the compiled `RELEASE_KEYS` and holds the same payload bytes. The write is atomic, and `--out` may be the `--previous` file.
+- `sign` and `verify` print `key<TAB>value` lines: `key_id`, `sequence`, `expires` (RFC 3339), `runtimes` and `artifacts`, in that order. `verify` checks the envelope with the compiled keys only, then its payload, and refuses an expired one. With `--payload`, the signed bytes must equal that file byte for byte.
+- `key check` prints `key<TAB>value` lines: `public_key` (64 lower-case hex, the line for `RELEASE_KEYS`), `key_id`, and `trust`, which is `compiled release key` or `not compiled in`. Both exit 0.
+- The owner's commands for publishing and signing, in order, are in `catalog/README.md`.
+
+### Release scripts
+
+`release-set.sh` and `release-check.sh` are used by the workflows. They print a `ck-build:` error and exit 1 on any refusal; `release-set.sh` exits 2 on bad usage.
+
+```text
+release-set.sh [--allow-partial] <artifacts-dir> <out-dir>
+release-set.sh [--allow-partial] --check <dir>
+```
+
+- **`release-set.sh`** builds the release set: one folder per tag, `php-<X.Y.Z>-ck<N>`, which `payload build --releases` reads and the publish workflow uploads.
+  - **Input:** `<artifacts-dir>` is flat. It holds the run's `php-<os>-<X.Y>` artifacts merged into one folder (`download-artifact` with `merge-multiple`), and only archives `php-<version>-<os>-<cpu>.tar.gz` with their descriptors.
+  - **Output:** `<out-dir>` must not exist. Each version's folder gets its archives, their descriptors and `SHA256SUMS`, which is byte for byte what `sha256sum` writes for the archives, in name order.
+  - **Checks:** it then checks the result as `--check` does. Each folder must hold exactly the archive and descriptor of each platform plus `SHA256SUMS`. Each descriptor must name its archive, version and platform, and its SHA256 and size must equal the archive's.
+  - **Platforms:** every version needs both v1 platforms, `linux-x86_64` and `macos-aarch64`. `--allow-partial` accepts fewer, for one-OS test builds only. A publishable set never uses it.
+- **`release-check.sh`** is the publish gate's run check. It takes no arguments and reads only its environment and two files, with no network.
+  - **Inputs:** `RUN_JSON` (the REST API's `GET /repos/<repo>/actions/runs/<id>`), `BUILD_INFO` (the run's `build-info.json`), `RUN_ID`, `COMMIT`, `EXPECTED_WORKFLOW_PATH`, and the publish run's own `GITHUB_SHA`, `GITHUB_REF` and `GITHUB_REPOSITORY`.
+  - **What it accepts:** the commit equals `GITHUB_SHA`, on `refs/heads/main`. The run is that id, of that workflow, in this repository with this repository as its head. It is a `workflow_dispatch` on `main` at that commit, `completed` with `success`. Its `build-info.json` holds exactly the keys `clean`, `commit`, `event`, `ref`, `run_attempt`, `run_id` and `workflow`, with `clean: true` and values that agree.
 
 ### `lock export` lines
 
@@ -159,7 +234,7 @@ optional  ftp shmop soap ...
 
 ### Descriptor
 
-`pack` writes one per archive and `payload build` reads them. Unknown fields are refused. `os`, `cpu` and `format` take `ck-core`'s catalog values; `cpu` becomes the catalog's `arch`.
+`pack` writes one per archive; `payload build` reads them from the downloaded releases. Unknown fields are refused. `os`, `cpu` and `format` take `ck-core`'s catalog values; `cpu` becomes the catalog's `arch`.
 
 ```json
 {
@@ -230,6 +305,8 @@ Sourcing also defines the read-only `CK_BUILD_ROOT` and `CK_REPO_ROOT`. It creat
   - `ck_platform_env` exports the compilers and flags for that OS: `-O2 -fPIC`; on macOS also the 12.0 deployment target and `-headerpad_max_install_names`.
   - `ck_platform_shlib_ext` prints `so` or `dylib`.
   - `ck_platform_rpath <bin|ext|lib>` prints the rpath for each folder.
+  - `ck_platform_null_dir` prints the null folder: `/proc/ck-dev-none` or `/System/ck-dev-none`.
+  - `ck_platform_mtime <file>` prints a file's mtime in Unix seconds.
 - **`deps/all.sh`:** `ck_deps_build <stack>` builds every library in order: pkgconf, patchelf (Linux only), zlib, openssl, libxml2, sqlite, oniguruma, libsodium, icu, curl.
 - **`deps/<name>.sh`:** each defines `ck_dep_<name>`. It skips the build when the stamp `<prefix>/.stamps/<name>-<version>` already exists.
 

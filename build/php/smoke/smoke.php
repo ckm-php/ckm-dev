@@ -6,7 +6,9 @@
 //
 // Optional environment:
 //   CK_PHP_EXPECT_VERSION  the exact PHP_VERSION, such as 8.5.12
-//   CK_PHP_EXPECT_BUILTIN  space-separated extensions that must be built in
+//   CK_PHP_EXPECT_BUILTIN  space-separated extensions that must be built in;
+//                          they must be loaded here, and smoke.sh checks
+//                          that `php -n -m` lists exactly these
 //
 // PHP 7.4 syntax only.
 

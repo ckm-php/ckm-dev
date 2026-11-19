@@ -1,0 +1,427 @@
+# Publishes one clean "PHP build" run's archives as runtime releases (D25):
+# one release per version, tag `php-<version>`, holding the archives, their
+# descriptors and SHA256SUMS. Nothing is rebuilt.
+#
+# `prepare` (read-only) checks the candidate run and its files and writes a
+# summary. `publish` runs only after the owner approves it in the `release`
+# environment, and only when that environment holds RELEASE_GATE=armed. It
+# attests the archives, creates each release as a draft at
+# this workflow's commit, uploads and re-downloads the files, and only then
+# publishes the drafts, which creates the tags last. A failure before that
+# deletes the drafts it made; a published release is never touched.
+#
+#   gh workflow run "PHP publish" -R <owner>/<repo> -f run_id=<id> -f commit=<40 hex>
+name: PHP publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Id of the clean "PHP build" run to publish
+        required: true
+        type: string
+      commit:
+        description: Its commit (40 hex); must be this workflow's own commit on main
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: php-publish
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Check the candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tags: ${{ steps.set.outputs.tags }}
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      COMMIT: ${{ inputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The inputs are untrusted text: nothing below uses them until they
+      # pass. release-check.sh checks them again.
+      - name: Check the inputs
+        run: |
+          if ! [[ $RUN_ID =~ ^[1-9][0-9]{0,19}$ ]]; then
+            echo "::error::run_id is not a run id"
+            exit 1
+          fi
+          if ! [[ $COMMIT =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::commit is not 40 lower-case hex characters"
+            exit 1
+          fi
+          if [ "$COMMIT" != "$GITHUB_SHA" ]; then
+            echo "::error::commit is not this workflow's own commit; dispatch it on main at that commit"
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::dispatch this workflow on main"
+            exit 1
+          fi
+
+      - name: Read the candidate run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" >"$RUNNER_TEMP/run.json"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-info
+          path: ${{ runner.temp }}/build-info
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # T6: a clean, successful dispatch of php-build.yml on main at this
+      # commit.
+      - name: Check the run
+        env:
+          RUN_JSON: ${{ runner.temp }}/run.json
+          BUILD_INFO: ${{ runner.temp }}/build-info/build-info.json
+          EXPECTED_WORKFLOW_PATH: .github/workflows/php-build.yml
+        run: bash build/php/release-check.sh
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-set
+          path: ${{ runner.temp }}/release-set
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # rustup is preinstalled; with no arguments it installs the toolchain
+      # pinned in rust-toolchain.toml. No cache: the checks run on a build
+      # of this commit only.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Build ck-release
+        run: cargo build -p ck-release --release --locked
+
+      # Both platforms per version and nothing else; each archive equals its
+      # descriptor and SHA256SUMS (checked twice, by the script and by
+      # ck-release); each version is the manifest's.
+      - name: Check the release set
+        id: set
+        run: |
+          set_dir=$RUNNER_TEMP/release-set
+          ck=target/release/ck-release
+          bash build/php/release-set.sh --check "$set_dir"
+          "$ck" lock check
+          expires=$(date -u -d '+90 days' +%Y-%m-%dT%H:%M:%SZ)
+          "$ck" payload build --releases "$set_dir" --sequence 1 --expires "$expires" \
+            --out "$RUNNER_TEMP/check-payload.json"
+          "$ck" assets verify --payload "$RUNNER_TEMP/check-payload.json" --releases "$set_dir"
+          tags=
+          for folder in "$set_dir"/*; do
+            tag=$(basename "$folder")
+            if ! [[ $tag =~ ^php-([0-9]+)\.([0-9]+)\.[0-9]+-ck[1-9][0-9]*$ ]]; then
+              echo "::error::$tag is not a PHP release tag"
+              exit 1
+            fi
+            line="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            info=$("$ck" lock line "$line")
+            want=
+            while IFS=$'\t' read -r key value; do
+              if [ "$key" = version ]; then want=$value; fi
+            done <<<"$info"
+            if [ "$tag" != "php-$want" ]; then
+              echo "::error::$tag is not the manifest's version for PHP $line (php-$want)"
+              exit 1
+            fi
+            tags="$tags $tag"
+          done
+          tags=${tags# }
+          if [ -z "$tags" ]; then
+            echo "::error::the release set is empty"
+            exit 1
+          fi
+          echo "tags: $tags"
+          echo "tags=$tags" >>"$GITHUB_OUTPUT"
+
+      # Fail closed: both calls must succeed and list no exact match. This
+      # token cannot see drafts; `publish` checks again with one that can.
+      - name: No release or tag exists yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAGS: ${{ steps.set.outputs.tags }}
+        run: |
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')
+          for tag in $TAGS; do
+            if grep -qxF -- "$tag" <<<"$releases"; then
+              echo "::error::a release $tag already exists"
+              exit 1
+            fi
+            refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq '.[].ref')
+            if grep -qxF -- "refs/tags/$tag" <<<"$refs"; then
+              echo "::error::a tag $tag already exists"
+              exit 1
+            fi
+          done
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.set.outputs.tags }}
+        run: |
+          {
+            echo "## Candidate"
+            echo
+            echo "- Build run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
+            echo "- Commit: \`$COMMIT\`"
+            echo "- Tags: $TAGS"
+            echo
+            echo "| Tag | File | Size | SHA256 |"
+            echo "|---|---|---|---|"
+            for tag in $TAGS; do
+              for descriptor in "$RUNNER_TEMP/release-set/$tag"/*.json; do
+                jq -r --arg tag "$tag" '"| \($tag) | \(.file) | \(.size) | `\(.sha256)` |"' "$descriptor"
+              done
+            done
+            echo
+            echo "Approve the \`publish\` job only if these are the files you checked."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified-release-set
+          path: ${{ runner.temp }}/release-set/
+          if-no-files-found: error
+          # The approval may wait a few days.
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish the releases
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # The owner approves this job in the GitHub web page.
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      COMMIT: ${{ inputs.commit }}
+      TAGS: ${{ needs.prepare.outputs.tags }}
+    steps:
+      # Fail closed: RELEASE_GATE is set only inside the protected `release`
+      # environment. If that environment is missing (a job that names one
+      # creates it unprotected) or lost its variable, nothing publishes.
+      - name: Check the release environment
+        env:
+          RELEASE_GATE: ${{ vars.RELEASE_GATE }}
+        run: |
+          if [ "$RELEASE_GATE" != armed ]; then
+            echo "::error::the release environment is not set up: it must hold the variable RELEASE_GATE=armed (catalog/README.md, step B)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified-release-set
+          path: ${{ runner.temp }}/release-set
+
+      # Defence in depth: the same commit, the same tags as `prepare`
+      # reported, and every file hashed again.
+      - name: Check the verified set again
+        run: |
+          set_dir=$RUNNER_TEMP/release-set
+          if [ "$COMMIT" != "$GITHUB_SHA" ] || [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::this run is not on main at the checked commit"
+            exit 1
+          fi
+          tags=
+          for folder in "$set_dir"/*; do
+            tag=$(basename "$folder")
+            if ! [[ $tag =~ ^php-[0-9]+\.[0-9]+\.[0-9]+-ck[1-9][0-9]*$ ]]; then
+              echo "::error::$tag is not a PHP release tag"
+              exit 1
+            fi
+            tags="$tags $tag"
+          done
+          if [ -z "$TAGS" ] || [ "${tags# }" != "$TAGS" ]; then
+            echo "::error::the release set does not hold the tags prepare checked ($TAGS)"
+            exit 1
+          fi
+          bash build/php/release-set.sh --check "$set_dir"
+          for tag in $TAGS; do
+            (cd "$set_dir/$tag" && sha256sum --check --strict SHA256SUMS)
+          done
+
+      # Cleanup runs only after this step passed, so it never deletes a
+      # draft this run did not create.
+      - name: No release or tag exists yet (drafts included)
+        id: fresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')
+          for tag in $TAGS; do
+            if grep -qxF -- "$tag" <<<"$releases"; then
+              echo "::error::a release or draft named $tag already exists; delete a leftover draft by hand"
+              exit 1
+            fi
+            refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq '.[].ref')
+            if grep -qxF -- "refs/tags/$tag" <<<"$refs"; then
+              echo "::error::a tag $tag already exists"
+              exit 1
+            fi
+          done
+
+      # An attestation for each archive, signed in Sigstore's public log by
+      # this workflow (php-publish.yml) for these exact files.
+      - name: Attest the archives
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release-set/*/*.tar.gz
+
+      # Phase 1: drafts. A draft has no tag yet, so deleting one after a
+      # failure leaves nothing behind.
+      - name: Create the drafts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+        run: |
+          for tag in $TAGS; do
+            version=${tag#php-}
+            notes=$RUNNER_TEMP/notes-$tag.md
+            {
+              echo "PHP $version for Linux x86_64 and macOS on Apple Silicon, built by CK Dev's CI."
+              echo
+              echo "- Build run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
+              echo "- Commit: $COMMIT"
+              echo "- Attestation, signed by the publish workflow (php-publish.yml) for these exact files: $ATTESTATION_URL"
+              echo
+              echo "Check an archive with \`gh attestation verify <file> --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/php-publish.yml\` and against \`SHA256SUMS\`."
+            } >"$notes"
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --latest=false \
+              --title "PHP $version" --notes-file "$notes"
+            ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq ".[] | select(.draft and .tag_name == \"$tag\") | .id")
+            if ! [[ $ids =~ ^[0-9]+$ ]]; then
+              echo "::error::expected exactly one draft for $tag, found: $ids"
+              exit 1
+            fi
+            echo "draft $ids for $tag"
+          done
+
+      - name: Upload the assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for tag in $TAGS; do
+            files=("$RUNNER_TEMP/release-set/$tag"/*)
+            gh release upload "$tag" "${files[@]}"
+          done
+
+      # What was uploaded must be byte for byte what was checked: the same
+      # file names, and the same bytes for every file (descriptors and
+      # SHA256SUMS included).
+      - name: Check the uploaded assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for tag in $TAGS; do
+            uploaded=$RUNNER_TEMP/uploaded/$tag
+            mkdir -p "$uploaded"
+            gh release download "$tag" --dir "$uploaded"
+            diff -r "$RUNNER_TEMP/release-set/$tag" "$uploaded"
+            (cd "$uploaded" && sha256sum --check --strict SHA256SUMS)
+          done
+
+      # Phase 2: publish each draft, which creates its tag at this commit.
+      # Nothing else runs between two publishes, so a failed read cannot
+      # leave one checked version unpublished.
+      - name: Publish the drafts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          : >"$RUNNER_TEMP/published"
+          for tag in $TAGS; do
+            gh release edit "$tag" --draft=false --latest=false
+            echo "$tag" >>"$RUNNER_TEMP/published"
+          done
+
+      - name: Check the tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for tag in $TAGS; do
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)
+            if [ "$sha" != "$GITHUB_SHA" ]; then
+              echo "::error::the tag $tag points at $sha, not $GITHUB_SHA"
+              exit 1
+            fi
+          done
+          {
+            echo "## Published"
+            echo
+            for tag in $TAGS; do
+              echo "- $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$tag"
+            done
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      # Deletes only releases that are still drafts, by id, after reading
+      # each one again. A published release keeps its tag: deleting it would
+      # burn the tag under immutable releases.
+      - name: Delete the drafts after a failure
+        if: ${{ (failure() || cancelled()) && steps.fresh.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=0
+          for tag in $TAGS; do
+            if ! [[ $tag =~ ^php-[0-9]+\.[0-9]+\.[0-9]+-ck[1-9][0-9]*$ ]]; then
+              continue
+            fi
+            if ! ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq ".[] | select(.draft and .tag_name == \"$tag\") | .id"); then
+              echo "::error::could not list the drafts for $tag; check the releases by hand"
+              status=1
+              continue
+            fi
+            for id in $ids; do
+              draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$id" --jq .draft) || draft=unknown
+              if [ "$draft" != true ]; then
+                echo "::warning::release $id ($tag) is no longer a draft; left alone"
+                continue
+              fi
+              if gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"; then
+                echo "deleted draft $id ($tag)"
+              else
+                echo "::error::could not delete draft release $id ($tag); delete it by hand"
+                status=1
+              fi
+            done
+          done
+          published=
+          if [ -s "$RUNNER_TEMP/published" ]; then
+            published=$(tr '\n' ' ' <"$RUNNER_TEMP/published")
+          fi
+          {
+            echo "## Publishing failed"
+            echo
+            echo "- Already published (tags exist, kept): ${published:-none}"
+            echo "- Drafts of the others were deleted, unless an error above says otherwise."
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "$status"

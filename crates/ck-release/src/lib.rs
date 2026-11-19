@@ -5,9 +5,17 @@
 //!   is their only reader and the only writer of the lock.
 //! - [`pack`]: packs a relocated runtime folder into the archive users unpack,
 //!   and writes its [`Descriptor`].
-//! - [`payload`]: turns descriptors into an unsigned catalog payload.
+//! - [`payload`]: measures the downloaded release files and turns them into
+//!   the unsigned catalog payload, and reads a payload file back.
+//! - [`assets`]: checks a payload against the downloaded release files.
+//! - [`key`]: reads the owner's signing key (Linux and macOS only, never in
+//!   CI) and reports what it is.
+//! - [`sign`]: signs a payload into an envelope (D25), and verifies one with
+//!   the compiled keys.
 //!
-//! `build/php/README.md` freezes the formats and the CLI.
+//! `build/php/README.md` freezes the formats and the CLI. Every failure is an
+//! [`Error`]: `Io` for a file-system call, `Core` for an error `ck-core`
+//! returns, and `Invalid` for every rule this tool adds, refusals included.
 
 use std::fs;
 use std::io;
@@ -18,9 +26,12 @@ use ck_core::catalog::schema::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod assets;
+pub mod key;
 pub mod lock;
 pub mod pack;
 pub mod payload;
+pub mod sign;
 
 /// Result with [`Error`] as the default error.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -152,6 +163,15 @@ pub fn asset_file_name(name: &RuntimeName, version: &RuntimeVersion, platform: P
     )
 }
 
+/// The release download folder every artifact URL sits under, from
+/// `ck-core`'s compiled catalog URL:
+/// `https://github.com/ckm-php/ckm-dev/releases/download/`.
+pub fn release_prefix() -> Result<&'static str> {
+    ck_core::catalog::trust::release_download_prefix().ok_or_else(|| {
+        Error::Invalid("this build has no catalog URL, so no release prefix".to_owned())
+    })
+}
+
 /// Reads an OS as `ck-core` spells it: `linux`, `macos` or `windows`.
 pub fn parse_os(text: &str) -> Result<Os> {
     [Os::Linux, Os::Macos, Os::Windows]
@@ -175,4 +195,40 @@ pub(crate) fn to_pretty_json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
         .map_err(|error| Error::Invalid(format!("cannot serialize: {error}")))?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+/// Helpers shared by the unit tests of every module.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A new folder under the system temp folder, removed on drop.
+    pub(crate) struct TempDir(pub(crate) PathBuf);
+
+    impl TempDir {
+        pub(crate) fn new() -> Self {
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.subsec_nanos());
+            let path = env::temp_dir().join(format!(
+                "ck-release-{}-{nanos}-{}",
+                process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 }

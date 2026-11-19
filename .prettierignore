@@ -10,3 +10,7 @@ pnpm-lock.yaml
 Cargo.lock
 # Written only by `ck-release lock set`, in its own canonical form.
 catalog/*.lock.json
+# The exact bytes `ck-release payload build` writes and `sign` signs, and the
+# signed envelope: never reformatted.
+catalog/payload-v1.json
+catalog/catalog-v1.json

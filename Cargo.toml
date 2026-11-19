@@ -68,6 +68,9 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_System_Threading",
   "Win32_System_Console",
 ] }
+# Wipes ck-release's own key buffers. ed25519-dalek's `zeroize` feature stays
+# off, so the app links the same ed25519-dalek as before.
+zeroize = "1.9.2"
 # Stored and Deflate only: every other method needs C or is refused anyway.
 zip = { version = "9.7.0", default-features = false, features = ["deflate-flate2"] }
 

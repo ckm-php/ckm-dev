@@ -5,23 +5,25 @@
 //! - T3 packs a small fixture tree. Nothing installed is run.
 //! - T4 (`#[ignore]`, CI only) installs a real PHP build, named by
 //!   `CK_PHP_ARCHIVE` and `CK_PHP_DESCRIPTOR`, into a path with a space, then
-//!   runs it from there with a cleared environment.
+//!   runs it from there with a cleared environment (`support/php.rs`). It
+//!   refuses to run unless `CI` or `GITHUB_ACTIONS` is set.
 //!
 //! Debug builds on Linux and macOS only: the policy of a release build
 //! refuses plain HTTP to loopback, and `pack` runs on Unix only.
 #![cfg(all(debug_assertions, unix))]
 
+#[path = "support/php.rs"]
+mod php;
 #[path = "support/server.rs"]
 mod server;
 #[path = "../../ck-core/tests/support/signing.rs"]
 mod signing;
 
 use std::env;
-use std::ffi::OsString;
 use std::fs::{self, DirBuilder, Permissions};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, Output};
+use std::process;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ck_core::catalog::refresh;
@@ -82,16 +84,11 @@ fn a_packed_tree_installs_through_a_signed_catalog_with_normal_modes() {
         license: "PHP-3.01".to_owned(),
     };
     let out = root.path().join("out");
-    let descriptors = root.path().join("descriptors");
     fs::create_dir(&out).unwrap();
-    fs::create_dir(&descriptors).unwrap();
     let archive = out.join(asset_file_name(&spec.name, &spec.version, spec.platform));
-    pack(&tree, &archive, &spec)
-        .unwrap()
-        .write(&descriptors.join("php.json"))
-        .unwrap();
+    let descriptor = pack(&tree, &archive, &spec).unwrap();
 
-    let (dir, _) = install_packed(root.path(), &archive, &descriptors);
+    let (dir, _) = install_packed(root.path(), &archive, &descriptor);
     for (name, contents, _, mode) in FILES {
         let path = dir.join(name);
         assert_eq!(fs::read(&path).unwrap(), contents, "{}", path.display());
@@ -108,6 +105,9 @@ fn a_packed_tree_installs_through_a_signed_catalog_with_normal_modes() {
 #[test]
 #[ignore = "CI only: needs a real PHP archive in CK_PHP_ARCHIVE and CK_PHP_DESCRIPTOR"]
 fn a_real_php_archive_installs_into_a_path_with_a_space_and_runs_there() {
+    // First of all, so `--ignored` never runs a downloaded PHP on a
+    // developer machine.
+    php::require_ci();
     let archive = required_path("CK_PHP_ARCHIVE");
     let descriptor = Descriptor::read(&required_path("CK_PHP_DESCRIPTOR")).unwrap();
     assert_eq!(
@@ -116,47 +116,23 @@ fn a_real_php_archive_installs_into_a_path_with_a_space_and_runs_there() {
         "the archive is for another computer"
     );
     let root = TempRoot::create("ck net-php");
-    let descriptors = root.path().join("descriptors");
-    fs::create_dir(&descriptors).unwrap();
-    descriptor.write(&descriptors.join("php.json")).unwrap();
 
-    let (dir, took) = install_packed(root.path(), &archive, &descriptors);
+    let (dir, took) = install_packed(root.path(), &archive, &descriptor);
     eprintln!(
         "installing {} {} ({} bytes) took {took:?}",
         descriptor.name, descriptor.version, descriptor.size
     );
     assert!(dir.to_string_lossy().contains(' '), "{}", dir.display());
 
-    let php = Php { root: dir };
     let patch = descriptor.version.as_str().split('-').next().unwrap();
-    let version = php.run(&[OsString::from("-v")]);
-    assert_clean(&version, "php -v");
-    let stdout = String::from_utf8_lossy(&version.stdout);
-    assert!(stdout.contains(&format!("PHP {patch} ")), "{stdout}");
-
-    let extensions = php.shared_extensions();
-    assert!(!extensions.is_empty(), "ext/ holds no shared extensions");
-
-    // The smoke script runs with every shared extension loaded.
-    if let Some(smoke) = env::var_os("CK_PHP_SMOKE") {
-        let mut args: Vec<OsString> = extensions.iter().flat_map(|ext| php.load(ext)).collect();
-        args.push(smoke);
-        assert_clean(&php.run(&args), "the smoke script");
-    }
-
-    for ext in &extensions {
-        let mut args = php.load(ext).to_vec();
-        args.push("-r".into());
-        args.push(format!("exit(extension_loaded({:?}) ? 0 : 1);", ext.module).into());
-        assert_clean(&php.run(&args), &format!("loading {} alone", ext.name));
-    }
+    php::check_installed(&dir, patch, env::var_os("CK_PHP_SMOKE").as_deref());
 }
 
-/// Builds a payload from the one descriptor in `descriptors` with a loopback
-/// base URL, signs the bytes `payload::write` wrote, serves the catalog and
-/// `archive`, then refreshes and installs in an isolated profile under
-/// `root`. Returns the version's folder and how long the install took.
-fn install_packed(root: &Path, archive: &Path, descriptors: &Path) -> (PathBuf, Duration) {
+/// Builds a payload from `descriptor` under a loopback release prefix, signs
+/// the bytes `payload::write` wrote, serves the catalog and `archive`, then
+/// refreshes and installs in an isolated profile under `root`. Returns the
+/// version's folder and how long the install took.
+fn install_packed(root: &Path, archive: &Path, descriptor: &Descriptor) -> (PathBuf, Duration) {
     let paths = Paths {
         home: root.to_path_buf(),
         data: root.join("data"),
@@ -166,25 +142,21 @@ fn install_packed(root: &Path, archive: &Path, descriptors: &Path) -> (PathBuf, 
     // `refresh`, `install` and the payload's URL check share this policy.
     let policy = TransportPolicy::current(paths.profile);
 
-    let descriptors = payload::read_descriptors(descriptors).unwrap();
-    let [descriptor] = descriptors.as_slice() else {
-        panic!("expected one descriptor, found {}", descriptors.len());
-    };
     let server = TestServer::start();
     let now = SystemTime::now();
     let expires = (now + VALID_FOR)
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let base_url = server.url("");
+    let prefix = server.url("/releases/download/");
     let spec = PayloadSpec {
-        base_url: &base_url,
+        prefix: &prefix,
         sequence: 1,
         expires,
     };
     let payload_path = root.join("payload.json");
     payload::write(
-        &payload::build(&descriptors, &spec, &policy).unwrap(),
+        &payload::assemble(std::slice::from_ref(descriptor), &spec, &policy).unwrap(),
         &payload_path,
     )
     .unwrap();
@@ -192,7 +164,10 @@ fn install_packed(root: &Path, archive: &Path, descriptors: &Path) -> (PathBuf, 
     let envelope = key.sign(SIGNING_CONTEXT, &fs::read(&payload_path).unwrap());
     server.reply("/catalog-v1.json", Reply::ok(envelope.to_bytes()));
     server.reply(
-        &format!("/{}", descriptor.file),
+        &format!(
+            "/releases/download/{}-{}/{}",
+            descriptor.name, descriptor.version, descriptor.file
+        ),
         Reply::ok(fs::read(archive).unwrap()),
     );
 
@@ -220,101 +195,6 @@ fn install_packed(root: &Path, archive: &Path, descriptors: &Path) -> (PathBuf, 
     let took = started.elapsed();
     assert_eq!(outcome, InstallOutcome::Installed(dir.clone()));
     (dir, took)
-}
-
-/// One shared extension in `ext/`.
-struct Extension {
-    /// The file name without `.so`.
-    name: String,
-    /// The name `extension_loaded` knows it by.
-    module: String,
-    path: PathBuf,
-    zend: bool,
-}
-
-/// The installed PHP, run only from its folder in the test profile.
-struct Php {
-    root: PathBuf,
-}
-
-impl Php {
-    /// `bin/php` with an empty environment except a fixed `PATH`, from its
-    /// own folder, with no ini file and the settings the relocation contract
-    /// (`build/php/README.md`) says the app passes, then `args`.
-    fn run(&self, args: &[OsString]) -> Output {
-        let cert = self.root.join("etc").join("ssl").join("cert.pem");
-        Command::new(self.root.join("bin").join("php"))
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .current_dir(&self.root)
-            .arg("-n")
-            .arg("-d")
-            .arg(setting("extension_dir", &self.root.join("ext")))
-            .arg("-d")
-            .arg(setting("openssl.cafile", &cert))
-            .arg("-d")
-            .arg(setting("curl.cainfo", &cert))
-            .args(["-d", "include_path=."])
-            .args(args)
-            .output()
-            .unwrap()
-    }
-
-    /// Every `ext/*.so`, sorted by name. opcache is the only Zend extension
-    /// this round builds, and it registers as "Zend OPcache".
-    fn shared_extensions(&self) -> Vec<Extension> {
-        let mut extensions: Vec<Extension> = fs::read_dir(self.root.join("ext"))
-            .unwrap()
-            .map(|item| item.unwrap().path())
-            .filter_map(|path| {
-                let name = path.file_name()?.to_str()?.strip_suffix(".so")?.to_owned();
-                let zend = name == "opcache";
-                let module = if zend {
-                    "Zend OPcache".to_owned()
-                } else {
-                    name.clone()
-                };
-                Some(Extension {
-                    name,
-                    module,
-                    path,
-                    zend,
-                })
-            })
-            .collect();
-        extensions.sort_by(|a, b| a.name.cmp(&b.name));
-        extensions
-    }
-
-    /// The `-d` arguments that load `ext`: a Zend extension by its path.
-    fn load(&self, ext: &Extension) -> [OsString; 2] {
-        let setting = if ext.zend {
-            setting("zend_extension", &ext.path)
-        } else {
-            OsString::from(format!("extension={}", ext.name))
-        };
-        ["-d".into(), setting]
-    }
-}
-
-/// `<key>=<path>` for `-d`. PHP quotes a value that starts with `/`, so a
-/// path with a space stays one value.
-fn setting(key: &str, path: &Path) -> OsString {
-    let mut setting = OsString::from(format!("{key}="));
-    setting.push(path);
-    setting
-}
-
-/// The run exited 0 and printed no startup error, such as a library or an
-/// extension that failed to load.
-fn assert_clean(output: &Output, what: &str) {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && !format!("{stdout}{stderr}").contains("PHP Startup"),
-        "{what}: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-        output.status
-    );
 }
 
 fn required_path(name: &str) -> PathBuf {

@@ -16,13 +16,17 @@
 #   $ORIGIN/../lib (bin, ext) or $ORIGIN (lib) and there is no DT_RUNPATH;
 #   a library's soname is its file name; GLIBC_ versions at most
 #   CK_AUDIT_GLIBC_MAX, GLIBCXX_ at most CK_AUDIT_GLIBCXX_MAX, and no
-#   GLIBC_PRIVATE.
+#   GLIBC_PRIVATE; a GNU_RELRO segment and a GNU_STACK segment that is not
+#   executable; bin/ files are position-independent executables.
 # - macOS, every Mach-O: arm64 only; each linked library is @rpath/<a file in
 #   lib/> or in CK_AUDIT_MACOS_SYSTEM; a library's id is @rpath/<its name>;
 #   exactly one LC_RPATH, @loader_path/../lib (bin, ext) or @loader_path
-#   (lib); minimum macOS at most CK_AUDIT_MACOS_MIN; a valid signature.
+#   (lib); minimum macOS at most CK_AUDIT_MACOS_MIN; a valid signature;
+#   bin/ files are PIE executables.
 # - Every library in lib/ is linked by something.
 # - No build path in any object file: see ck_audit_strings.
+# - The defaults read at every start point into the null folder: see
+#   ck_audit_null_dir.
 #
 # Call the functions as plain commands, never in an `if`, `&&` or `||`.
 
@@ -62,6 +66,28 @@ readonly CK_AUDIT_MACOS_SYSTEM="/usr/lib/libSystem.B.dylib
 # refused, but not a file directly in it, which is a runtime default (the
 # MySQL socket /tmp/mysql.sock). /opt is checked separately.
 readonly CK_AUDIT_BAD_PATHS='/home/[A-Za-z0-9._-]+|/Users/[A-Za-z0-9._-]+|/tmp/[A-Za-z0-9._-]+/|/private/(tmp|var)/|/var/folders/|/usr/local|/nix/store/'
+
+# The build-root strings an object file may hold, each matched whole: paths
+# read only on demand or only when the relocation contract's settings are
+# missing, and constants, the configure line and compiler flags that are
+# never read. Everything else under /opt fails, including the defaults
+# moved to the null folder (OpenSSL's ssl folder, PHP's ini folders).
+readonly CK_AUDIT_BAKED_DEPS='/opt/ck-dev-build/deps/(legacy|current)'
+readonly CK_AUDIT_BAKED_PHP='/opt/ck-dev-build/php/[0-9]+\.[0-9]+/prefix'
+readonly CK_AUDIT_BAKED="^(/opt/ck-dev-build/\
+|$CK_AUDIT_BAKED_DEPS/lib/engines-[0-9.]+\
+|$CK_AUDIT_BAKED_DEPS/lib/ossl-modules\
+|$CK_AUDIT_BAKED_DEPS/etc/xml/catalog\
+|$CK_AUDIT_BAKED_DEPS/bin/pkgconf\
+|$CK_AUDIT_BAKED_DEPS/lib/pkgconfig\
+|$CK_AUDIT_BAKED_DEPS/share/pkgconfig\
+|$CK_AUDIT_BAKED_DEPS/include\
+|$CK_AUDIT_BAKED_PHP\
+|$CK_AUDIT_BAKED_PHP/(bin|sbin|etc|var|lib/php|php/man|share/php)\
+|$CK_AUDIT_BAKED_PHP/lib/php/extensions/no-debug-non-zts-[0-9]+\
+)\$"
+# The defaults read at every start, which must point into the null folder.
+readonly CK_AUDIT_START_DEFAULTS="^($CK_AUDIT_BAKED_DEPS/ssl(/.*)?|/opt/ck-dev-build/php/[0-9]+\\.[0-9]+/no-ini(\\.d)?)\$"
 
 readonly CK_AUDIT_NL=$'\n'
 
@@ -202,12 +228,26 @@ ck_object_folder() {
   esac
 }
 
+# ck_audit_tokens <file> <start>: prints each distinct string in the file
+# that begins with <start> (an ERE with no metacharacters but the ones it
+# means) and runs on over path characters, sorted. A string ends at the
+# first other byte: NUL, a quote, '=', ':' or ','.
+ck_audit_tokens() {
+  local out status=0
+  out=$(LC_ALL=C grep -a -o -E "$2[A-Za-z0-9._/+-]*" "$1" | LC_ALL=C sort -u) || status=$?
+  case "$status" in
+    0) printf '%s\n' "$out" ;;
+    1) ;;
+    *) ck_die "grep failed on $1" ;;
+  esac
+}
+
 # ck_audit_strings <file>: records a violation for each build path in the
-# file. /opt/ck-dev-build is the only /opt folder allowed: only root can
-# create it on a user's machine, and the libraries keep paths under it
-# (OPENSSLDIR, ICU's data folder, PHP's own prefix).
+# file. Under /opt only the strings CK_AUDIT_BAKED names are allowed: they
+# sit under /opt/ck-dev-build, which only root can create on a user's
+# machine, and none is read at every start.
 ck_audit_strings() {
-  local file=$1 hits status opt line
+  local file=$1 hits status opt line old
   status=0
   hits=$(LC_ALL=C grep -a -o -E "$CK_AUDIT_BAD_PATHS" "$file" | LC_ALL=C sort -u) || status=$?
   case "$status" in
@@ -225,22 +265,107 @@ ck_audit_strings() {
   if [ -n "$hits" ]; then
     ck_audit_fail "$file holds build paths: ${hits//"$CK_AUDIT_NL"/ }"
   fi
-  status=0
-  opt=$(LC_ALL=C grep -a -o -E '/opt/[A-Za-z0-9._-]*' "$file" | LC_ALL=C sort -u) || status=$?
-  case "$status" in
-    0) ;;
-    1) opt= ;;
-    *) ck_die "grep failed on $file" ;;
-  esac
+  opt=$(ck_audit_tokens "$file" /opt/) || exit 1
   hits=
+  old=
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [[ $line =~ $CK_AUDIT_BAKED ]]; then continue; fi
+    if [[ $line =~ $CK_AUDIT_START_DEFAULTS ]]; then
+      old="$old $line"
+    else
+      hits="$hits $line"
+    fi
+  done <<<"$opt"
+  if [ -n "$old" ]; then
+    ck_audit_fail "$file holds start-up defaults outside the null folder:$old"
+  fi
+  if [ -n "$hits" ]; then
+    ck_audit_fail "$file holds paths under /opt that are not on the baked-string list:$hits"
+  fi
+}
+
+# ck_audit_has_string <file> <string>: records a violation unless the file
+# holds <string> as a whole string (see ck_audit_tokens).
+ck_audit_has_string() {
+  local tokens
+  tokens=$(ck_audit_tokens "$1" "$2") || exit 1
+  case "$CK_AUDIT_NL$tokens$CK_AUDIT_NL" in
+    *"$CK_AUDIT_NL$2$CK_AUDIT_NL"*) ;;
+    *) ck_audit_fail "$1 does not hold $2" ;;
+  esac
+}
+
+# ck_audit_null_dir <root>: proves the defaults read at every start point
+# into the null folder: OpenSSL's config folder in libcrypto, and PHP's ini
+# path and scan folder in bin/php.
+ck_audit_null_dir() {
+  local root=$1 null file count=0
+  null=$(ck_platform_null_dir)
+  for file in "$root"/lib/libcrypto.*; do
+    if [ -L "$file" ] || [ ! -f "$file" ]; then continue; fi
+    count=$((count + 1))
+    ck_audit_has_string "$file" "$null/ssl"
+  done
+  [ "$count" -eq 1 ] || ck_audit_fail "expected one libcrypto in lib/, found $count"
+  if [ -f "$root/bin/php" ]; then
+    ck_audit_has_string "$root/bin/php" "$null/php"
+    ck_audit_has_string "$root/bin/php" "$null/php.d"
+  fi
+}
+
+# ck_audit_elf_hardening <file> <bin|ext|lib>: records a violation unless
+# the file has a GNU_RELRO segment and a GNU_STACK segment without the
+# execute flag, and, in bin/, is a position-independent executable (type
+# DYN with a program interpreter). readelf names a PIE "DYN (Shared object
+# file)" before binutils 2.38 and "DYN (Position-Independent Executable
+# file)" after, so only DYN is matched.
+ck_audit_elf_hardening() {
+  local file=$1 folder=$2 header line type='' phdrs ptype rest flags count=0 relro=0 interp=0 stack=''
+  header=$(LC_ALL=C readelf -hW "$file") || ck_die "readelf -h failed on $file"
   while IFS= read -r line; do
     case "$line" in
-      '' | /opt/ck-dev-build) ;;
-      *) hits="$hits $line" ;;
+      *'Type:'*)
+        type=${line#*Type:}
+        type=${type#"${type%%[! ]*}"}
+        ;;
     esac
-  done <<<"$opt"
-  if [ -n "$hits" ]; then
-    ck_audit_fail "$file holds paths under /opt other than /opt/ck-dev-build:$hits"
+  done <<<"$header"
+  phdrs=$(LC_ALL=C readelf -lW "$file") || ck_die "readelf -l failed on $file"
+  while IFS= read -r line; do
+    read -r ptype _ _ _ _ _ rest <<<"$line" || true
+    case "$ptype" in
+      PHDR | INTERP | LOAD | DYNAMIC | NOTE | TLS | GNU_*) count=$((count + 1)) ;;
+      *) continue ;;
+    esac
+    case "$ptype" in
+      INTERP) interp=1 ;;
+      GNU_RELRO) relro=1 ;;
+      GNU_STACK)
+        # Flg, then Align: drop the alignment; the flags may hold a space.
+        flags=${rest% *}
+        case "$flags" in
+          *E*) stack=exec ;;
+          *) stack=noexec ;;
+        esac
+        ;;
+    esac
+  done <<<"$phdrs"
+  if [ "$count" -eq 0 ]; then
+    ck_audit_fail "$file has no program headers; is readelf's output readable?"
+    return 0
+  fi
+  [ "$relro" -eq 1 ] || ck_audit_fail "$file has no GNU_RELRO segment"
+  case "$stack" in
+    noexec) ;;
+    exec) ck_audit_fail "$file has an executable stack (GNU_STACK)" ;;
+    *) ck_audit_fail "$file has no GNU_STACK segment, so its stack is executable" ;;
+  esac
+  if [ "$folder" = bin ]; then
+    case "$type" in
+      DYN*) [ "$interp" -eq 1 ] || ck_audit_fail "$file is a shared object, not an executable" ;;
+      *) ck_audit_fail "$file is not position-independent (type '$type')" ;;
+    esac
   fi
 }
 
@@ -264,7 +389,7 @@ ck_audit_layout() {
     esac
   done
   for name in bin/php bin/php-fpm bin/php-cgi etc/php.ini-development etc/php.ini-production \
-    etc/ssl/cert.pem licenses/php/LICENSE ck-runtime.json; do
+    etc/ssl/cert.pem licenses/php/LICENSE licenses/php/README.REDIST.BINS ck-runtime.json; do
     [ -f "$root/$name" ] || ck_audit_fail "missing $name"
   done
   found=$(find "$root" ! -type f ! -type d -print) || ck_die "find failed in $root"
@@ -356,6 +481,7 @@ ck_audit_linux_file() {
   if [ -z "$max" ] && [ "${file##*/}" = php ]; then
     ck_audit_fail "$file needs no GLIBC_ versions; is readelf's output readable?"
   fi
+  ck_audit_elf_hardening "$file" "$folder"
   versions=$(ck_elf_symbol_versions "$file" GLIBCXX) || exit 1
   while IFS= read -r v; do
     [ -n "$v" ] || continue
@@ -374,7 +500,7 @@ ck_audit_linux_file() {
 # ck_audit_macos_file <root> <file>: the Mach-O rules for one file; adds
 # the names in lib/ it links to CK_AUDIT_LINKED.
 ck_audit_macos_file() {
-  local root=$1 file=$2 folder want loads cmd value name archs rpaths='' id='' minos=''
+  local root=$1 file=$2 folder want loads cmd value name archs header rpaths='' id='' minos=''
   folder=$(ck_object_folder "$root" "$file") || exit 1
   if ! ck_is_macho "$file"; then
     ck_audit_fail "$file is not a Mach-O file"
@@ -425,6 +551,17 @@ ck_audit_macos_file() {
   if ! codesign --verify --strict "$file"; then
     ck_audit_fail "$file has no valid signature"
   fi
+  if [ "$folder" = bin ]; then
+    header=$(otool -hv "$file") || ck_die "otool -hv failed on $file"
+    case "$header" in
+      *EXECUTE*) ;;
+      *) ck_audit_fail "$file is not an executable (otool -hv)" ;;
+    esac
+    case "$header" in
+      *[[:space:]]PIE | *[[:space:]]PIE[[:space:]]*) ;;
+      *) ck_audit_fail "$file is not a PIE executable (otool -hv)" ;;
+    esac
+  fi
 }
 
 # ck_audit <root>: runs every check on the root and dies if any failed.
@@ -457,6 +594,7 @@ ck_audit() {
     esac
     ck_audit_strings "$file"
   done
+  ck_audit_null_dir "$root"
   for file in "$root"/lib/*; do
     [ -e "$file" ] || continue
     name=${file##*/}

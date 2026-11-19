@@ -1,0 +1,78 @@
+# Fetches the published catalog over real HTTPS on each OS (T7,
+# crates/ck-net/tests/published.rs), read-only. Modes (CK_PUBLISHED_CHECK):
+#   probe  the catalog release's transport probe: TLS, GitHub's redirect and
+#          the strict URL parser, before any catalog exists
+#   fetch  the catalog, verified with the compiled release keys
+#   run    as fetch, then installs each version for this OS into a temporary
+#          isolated profile and runs it (Linux and macOS; Windows has no
+#          published PHP yet, so it runs fetch instead)
+# The weekly run also fails when fewer than 21 days of the catalog's lifetime
+# are left (CK_PUBLISHED_MIN_DAYS).
+name: Catalog check
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: probe, fetch or run (Windows runs fetch for run)
+        type: choice
+        options: [probe, fetch, run]
+        default: probe
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: Catalog check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The input is untrusted text: only known values pass.
+      - name: Choose the mode
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_MODE: ${{ inputs.mode }}
+        run: |
+          if [ "$EVENT" = schedule ]; then
+            mode=run
+            echo "CK_PUBLISHED_MIN_DAYS=21" >>"$GITHUB_ENV"
+          else
+            mode=$INPUT_MODE
+          fi
+          case "$mode" in
+            probe | fetch | run) ;;
+            *) echo "::error::unknown mode (allowed: probe, fetch, run)"; exit 1 ;;
+          esac
+          if [ "$RUNNER_OS" = Windows ] && [ "$mode" = run ]; then mode=fetch; fi
+          echo "mode: $mode"
+          echo "CK_PUBLISHED_CHECK=$mode" >>"$GITHUB_ENV"
+
+      # rustup is preinstalled; with no arguments it installs the toolchain
+      # pinned in rust-toolchain.toml. No cache: this check stands alone.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Published catalog
+        env:
+          # Used by the run mode on Linux and macOS.
+          CK_PHP_SMOKE: ${{ github.workspace }}/build/php/smoke/smoke.php
+        run: cargo test -p ck-net --locked --test published -- --ignored --nocapture

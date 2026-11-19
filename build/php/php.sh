@@ -126,7 +126,7 @@ ck_php_ext_flag() {
     *) ck_die "php: unknown extension class: $class" ;;
   esac
   case "$name" in
-    core | date | hash | pcre | random | reflection | spl | standard)
+    core | date | hash | lexbor | pcre | random | reflection | spl | standard | uri)
       [ -z "$shared" ] || ck_die "php: $name is always built in"
       ;;
     json)
@@ -187,19 +187,20 @@ ck_php_line_cflags() {
 
 # ck_php_configure_args <line>: fills CK_PHP_CONFIGURE.
 ck_php_configure_args() {
-  local line=$1 dir prefix name flag major=${1%%.*}
+  local line=$1 prefix null name flag major=${1%%.*}
   local -a names
-  dir=$(ck_php_dir "$line")
   prefix=$(ck_php_prefix "$line")
-  # The ini folders: the app always passes -c or PHPRC, and these never
-  # exist on a user's machine, where only root could create them.
+  null=$(ck_platform_null_dir)
+  # The ini path and scan folder, read at every start without -n, -c or
+  # PHPRC: the app always passes -c or PHPRC, and these sit in the null
+  # folder, which no account can create.
   # --disable-rpath: relocation sets every library search path, so PHP adds
   # none of its own.
   CK_PHP_CONFIGURE=(
     --enable-option-checking=fatal
     --prefix="$prefix"
-    --with-config-file-path="$dir/no-ini"
-    --with-config-file-scan-dir="$dir/no-ini.d"
+    --with-config-file-path="$null/php"
+    --with-config-file-scan-dir="$null/php.d"
     --disable-all
     --enable-cli
     --enable-fpm
@@ -254,7 +255,7 @@ ck_php_apply_patches() {
 # (left exported for relocation), and checks the stack is built.
 ck_php_build() {
   local line=${1:-} os dir src prefix pin name version url sha size file archive
-  local jobs cflags ldflags libs sdk
+  local jobs cflags ldflags libs sdk epoch
   ck_check_line "$line"
   ck_php_line_load "$line"
   os=$(ck_os)
@@ -286,6 +287,12 @@ ck_php_build() {
   ck_run rm -rf "$src" "$prefix" "$(ck_php_root "$line")"
   ck_unpack "$archive" "$src"
   [ -f "$src/configure" ] || ck_die "php: no configure script in $src"
+  [ -f "$src/main/php_version.h" ] || ck_die "php: no main/php_version.h in $src"
+  # The build date compilers bake in (__DATE__, __TIME__) comes from the
+  # pinned source, read before patches touch any file, so a rebuild of the
+  # same pin bakes the same date. Only the PHP stage sets it so far.
+  epoch=$(ck_platform_mtime "$src/main/php_version.h") || exit 1
+  export SOURCE_DATE_EPOCH="$epoch"
   ck_php_apply_patches "$src" "$line"
 
   ck_php_configure_args "$line"

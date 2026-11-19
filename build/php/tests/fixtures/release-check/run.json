@@ -1,0 +1,18 @@
+{
+  "id": 44490557365,
+  "name": "PHP build",
+  "path": ".github/workflows/php-build.yml",
+  "event": "workflow_dispatch",
+  "head_branch": "main",
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "status": "completed",
+  "conclusion": "success",
+  "run_attempt": 1,
+  "workflow_id": 423558023,
+  "repository": {
+    "full_name": "ckm-php/ckm-dev"
+  },
+  "head_repository": {
+    "full_name": "ckm-php/ckm-dev"
+  }
+}

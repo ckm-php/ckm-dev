@@ -1,7 +1,12 @@
 # Builds PHP for Linux and macOS from pinned sources (D7, D14). It publishes
-# nothing: the archives, their descriptors and an unsigned catalog payload are
-# run artifacts only. Signing and release publishing come later and never
-# restore a cache.
+# nothing: the archives, their descriptors, the release set and an unsigned
+# catalog payload are run artifacts only.
+#
+# Caches: pushes, pull requests and ordinary dispatches are test runs and may
+# restore the library stack and the Rust build cache. Only a dispatch with
+# `clean` set can feed publishing (D25): it restores and saves no cache in any
+# job, records `clean: true` in its `build-info` artifact, and php-publish.yml
+# refuses every run whose `build-info` does not say so.
 name: PHP build
 
 on:
@@ -9,14 +14,16 @@ on:
     branches: [main]
     paths:
       - build/**
-      - catalog/**
+      - catalog/sources.lock.json
+      - catalog/php-lines.json
       - crates/ck-release/**
       - crates/ck-net/tests/php_archive.rs
       - .github/workflows/php-build.yml
   pull_request:
     paths:
       - build/**
-      - catalog/**
+      - catalog/sources.lock.json
+      - catalog/php-lines.json
       - crates/ck-release/**
       - crates/ck-net/tests/php_archive.rs
       - .github/workflows/php-build.yml
@@ -30,14 +37,21 @@ on:
         description: Operating systems, separated by spaces (linux, macos)
         type: string
         default: linux
+      clean:
+        description: Clean candidate for publishing (no caches; needs both OSes)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+# A newer run of the same event on the same branch replaces the older one.
+# A clean dispatch gets a group of its own (its run id) and is never
+# cancelled, so a later push or test dispatch cannot cut a publish candidate
+# short. `inputs.clean` is empty outside a dispatch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # A newer push or run on the same branch replaces the older one.
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{ inputs.clean && github.run_id || 'shared' }}
+  cancel-in-progress: ${{ !inputs.clean }}
 
 defaults:
   run:
@@ -52,6 +66,7 @@ jobs:
       tool: ${{ steps.matrix.outputs.tool }}
       deps: ${{ steps.matrix.outputs.deps }}
       php: ${{ steps.matrix.outputs.php }}
+      complete: ${{ steps.matrix.outputs.complete }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,6 +78,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           INPUT_LINES: ${{ inputs.lines }}
           INPUT_OSES: ${{ inputs.oses }}
+          INPUT_CLEAN: ${{ inputs.clean }}
           # What a push to main or a pull request builds.
           PR_LINES: '7.4 8.5'
           PR_OSES: linux macos
@@ -108,6 +124,13 @@ jobs:
             exit 1
           fi
           echo "lines: $sel_lines; oses: $sel_oses"
+          # A release needs every version on both OSes.
+          complete=false
+          if [ "$sel_oses" = 'linux macos' ]; then complete=true; fi
+          if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_CLEAN" = true ] && [ "$complete" != true ]; then
+            echo "::error::a clean build needs both OSes (oses: linux macos)"
+            exit 1
+          fi
 
           # Each line's stack comes from the manifest. ck-release is always
           # built for Linux, since the payload job runs there.
@@ -130,7 +153,36 @@ jobs:
             echo "tool=$(echo "$matrix" | jq -c .tool)"
             echo "deps=$(echo "$matrix" | jq -c .deps)"
             echo "php=$(echo "$matrix" | jq -c .php)"
+            echo "complete=$complete"
           } >>"$GITHUB_OUTPUT"
+
+      # What php-publish.yml checks before it publishes this run's archives.
+      - name: Write the build info
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_CLEAN: ${{ inputs.clean }}
+        run: |
+          clean=false
+          if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_CLEAN" = true ]; then clean=true; fi
+          mkdir -p "$RUNNER_TEMP/build-info"
+          jq -n \
+            --arg commit "$GITHUB_SHA" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg workflow .github/workflows/php-build.yml \
+            --arg event "$EVENT" \
+            --arg ref "$GITHUB_REF" \
+            --argjson clean "$clean" \
+            '{commit: $commit, run_id: $run_id, run_attempt: $run_attempt, workflow: $workflow,
+              event: $event, ref: $ref, clean: $clean}' >"$RUNNER_TEMP/build-info/build-info.json"
+          cat "$RUNNER_TEMP/build-info/build-info.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-info
+          path: ${{ runner.temp }}/build-info/build-info.json
+          if-no-files-found: error
+          retention-days: 7
 
   lint:
     name: Lint the build scripts
@@ -166,9 +218,17 @@ jobs:
           done
           exit "$status"
 
-      # T5: the pinned fetch with a stub curl and ck-release; no network.
+      # The pinned fetch with a stub curl and ck-release; no network.
       - name: Fetch self-test
         run: bash build/php/tests/fetch-selftest.sh
+
+      # T5: the audit's string rules.
+      - name: Audit self-test
+        run: bash build/php/tests/audit-selftest.sh
+
+      # T6: the publish gate's run check and release-set layout.
+      - name: Release-check self-test
+        run: bash build/php/tests/release-check-selftest.sh
 
   tool:
     name: ck-release (${{ matrix.os }})
@@ -189,6 +249,7 @@ jobs:
         run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: ${{ !inputs.clean }}
 
       - name: Build ck-release
         run: cargo build -p ck-release --release --locked
@@ -240,14 +301,17 @@ jobs:
           sudo mkdir -p /opt/ck-dev-build
           sudo chown "$(id -u):$(id -g)" /opt/ck-dev-build
 
-      # Test runs only: a publishable build never restores a cache. An exact
-      # key, with no restore-keys, so a stale stack is never reused.
+      # Test runs only: a clean build neither restores nor saves it. An exact
+      # key, with no restore-keys, so a stale stack is never reused. The key
+      # covers every script that writes into the prefix (relocate.sh saves
+      # the licences) or that build.sh sources.
       - name: Restore the library stack
         id: cache
+        if: ${{ !inputs.clean }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /opt/ck-dev-build/deps/${{ matrix.stack }}
-          key: php-deps-${{ matrix.runner }}-${{ runner.arch }}-${{ matrix.stack }}-${{ hashFiles('catalog/sources.lock.json', 'catalog/php-lines.json', 'build/php/build.sh', 'build/php/deps/**', 'build/php/lib/**') }}
+          key: php-deps-${{ matrix.runner }}-${{ runner.arch }}-${{ matrix.stack }}-${{ hashFiles('catalog/sources.lock.json', 'catalog/php-lines.json', 'build/php/build.sh', 'build/php/deps/**', 'build/php/lib/**', 'build/php/relocate.sh', 'build/php/audit.sh') }}
 
       - name: Build the library stack
         if: steps.cache.outputs.cache-hit != 'true'
@@ -340,14 +404,6 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-      # The payload job reads a folder of descriptors only.
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: descriptor-${{ matrix.os }}-${{ matrix.line }}
-          path: ${{ env.OUT_DESCRIPTOR }}
-          if-no-files-found: error
-          retention-days: 7
-
   contract:
     name: Contract PHP ${{ matrix.line }} (${{ matrix.os }})
     needs: [plan, lint, tool, php]
@@ -371,6 +427,7 @@ jobs:
       # On macOS the cache is not saved: its post step runs after Homebrew
       # is hidden.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: ${{ !inputs.clean }}
         with:
           save-if: ${{ runner.os != 'macOS' }}
 
@@ -454,11 +511,16 @@ jobs:
       - name: Bare root
         run: /bin/bash build/php/build.sh bare-root "$CK_PHP_ARCHIVE"
 
+  # The release set (one folder per version, as php-publish.yml uploads it)
+  # and the payload it would sign to. A test build of one OS lays out a
+  # partial set; a clean build is refused at the plan unless it has both.
   payload:
-    name: Unsigned catalog payload
+    name: Release set and unsigned catalog payload
     needs: [plan, tool, contract]
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+    env:
+      COMPLETE: ${{ needs.plan.outputs.complete }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -475,22 +537,39 @@ jobs:
           echo "CK_RELEASE_BIN=$RUNNER_TEMP/ck-release/ck-release" >>"$GITHUB_ENV"
           "$RUNNER_TEMP/ck-release/ck-release" lock check
 
+      # Merged into one flat folder: the archive names differ by version and
+      # platform, and one artifact alone would land flat anyway.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: descriptor-*
+          pattern: php-*
           merge-multiple: true
-          path: ${{ runner.temp }}/descriptors
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Lay out the release set
+        run: |
+          partial=()
+          if [ "$COMPLETE" != true ]; then partial=(--allow-partial); fi
+          bash build/php/release-set.sh ${partial[@]+"${partial[@]}"} \
+            "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/release-set"
+          (cd "$RUNNER_TEMP/release-set" && find . -type f | sort && cat ./*/SHA256SUMS)
 
       - name: Build the payload
         run: |
           expires=$(date -u -d '+90 days' +%Y-%m-%dT%H:%M:%SZ)
           "$CK_RELEASE_BIN" payload build \
-            --descriptors "$RUNNER_TEMP/descriptors" \
-            --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/php-candidate" \
+            --releases "$RUNNER_TEMP/release-set" \
             --sequence 1 \
             --expires "$expires" \
             --out "$RUNNER_TEMP/catalog-payload.candidate.json"
           cat "$RUNNER_TEMP/catalog-payload.candidate.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-set
+          path: ${{ runner.temp }}/release-set/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

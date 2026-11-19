@@ -8,6 +8,7 @@ filter
 hash
 iconv
 json
+lexbor
 libxml
 mysqlnd
 opcache
@@ -23,6 +24,7 @@ simplexml
 spl
 standard
 tokenizer
+uri
 xml
 xmlreader
 xmlwriter

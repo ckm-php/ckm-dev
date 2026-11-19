@@ -8,9 +8,11 @@
 #
 # 1. `php -v` names the expected version, when one is given (the argument,
 #    or CK_PHP_EXPECT_VERSION);
-# 2. smoke/smoke.php passes with every shared extension loaded, opcache as a
+# 2. `php -m`, with no shared extension loaded, lists exactly the built-in
+#    extensions in CK_PHP_EXPECT_BUILTIN, when it is set;
+# 3. smoke/smoke.php passes with every shared extension loaded, opcache as a
 #    Zend extension (CK_PHP_EXPECT_BUILTIN is passed on when set);
-# 3. each shared extension loads alone.
+# 4. each shared extension loads alone.
 #
 # Any "PHP Startup" message, such as a library that failed to load, fails.
 # Sourced by build.sh and bare-root.sh for ck_smoke and ck_smoke_args; run
@@ -102,7 +104,50 @@ ck_smoke_php() {
   return "$status"
 }
 
-# ck_smoke <root> [<php version>]: the runs above, plus `php -m` for the log.
+# ck_smoke_modules <php -m output>: prints the module names, lower case,
+# sorted and unique, without the section headers, and with opcache for
+# "Zend OPcache", which a built-in opcache lists in both sections.
+ck_smoke_modules() {
+  local line out=''
+  while IFS= read -r line; do
+    case "$line" in
+      '' | '['*']') continue ;;
+      'Zend OPcache') line=opcache ;;
+    esac
+    out="$out$line"$'\n'
+  done <<<"$1"
+  printf '%s' "$out" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C sort -u
+}
+
+# ck_smoke_builtin_equal <php -m output> <expected names>: dies unless the
+# modules equal the space-separated expected names, naming what is missing
+# and what is extra.
+ck_smoke_builtin_equal() {
+  local have name missing='' extra='' nl=$'\n' want
+  local -a names
+  want=$nl
+  have=$(ck_smoke_modules "$1") || exit 1
+  read -r -a names <<<"$2"
+  for name in ${names[@]+"${names[@]}"}; do
+    want="$want$name$nl"
+    case "$nl$have$nl" in
+      *"$nl$name$nl"*) ;;
+      *) missing="$missing $name" ;;
+    esac
+  done
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case "$want" in
+      *"$nl$name$nl"*) ;;
+      *) extra="$extra $name" ;;
+    esac
+  done <<<"$have"
+  if [ -n "$missing" ] || [ -n "$extra" ]; then
+    ck_die "smoke: php -m differs from the line's built-in list; missing:${missing:- none}; extra:${extra:- none}"
+  fi
+}
+
+# ck_smoke <root> [<php version>]: the runs above.
 ck_smoke() {
   local root=${1:-} want=${2:-${CK_PHP_EXPECT_VERSION:-}} status name setting module
   case "$root" in
@@ -124,11 +169,13 @@ ck_smoke() {
     esac
   fi
 
-  # The built-in modules, printed to the log so build/php/expected/ can be
-  # checked against what the binary really has.
+  # The built-in modules: -n and no -d extension=, so no shared one counts.
   status=0
   ck_smoke_php "$root" "${CK_SMOKE_BASE[@]}" -m || status=$?
   ck_smoke_check "php -m" "$status"
+  if [ -n "${CK_PHP_EXPECT_BUILTIN:-}" ]; then
+    ck_smoke_builtin_equal "$CK_SMOKE_OUT" "$CK_PHP_EXPECT_BUILTIN"
+  fi
 
   status=0
   ck_smoke_php "$root" "${CK_SMOKE_BASE[@]}" "${CK_SMOKE_LOAD[@]}" "$CK_SMOKE_PHP" || status=$?

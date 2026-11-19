@@ -351,14 +351,11 @@ mod other {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::env;
     use std::fs::{self, File, Permissions};
     use std::io::Read as _;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::path::{Path, PathBuf};
-    use std::process;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::path::Path;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use ck_core::catalog::schema::{Arch, Os, Sha256Digest};
     use flate2::read::GzDecoder;
@@ -366,6 +363,7 @@ mod tests {
 
     use super::*;
     use crate::asset_file_name;
+    use crate::test_support::TempDir;
 
     /// The fixture tree: path, bytes and the mode it is created with.
     const FILES: [(&str, &[u8], u32); 5] = [
@@ -519,30 +517,5 @@ mod tests {
         let result = pack(&tree, &out, &spec());
         assert!(result.is_err(), "{case}: {result:?}");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "{case}");
-    }
-
-    /// A new folder under the system temp folder, removed on drop.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            static NEXT: AtomicU32 = AtomicU32::new(0);
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |since| since.subsec_nanos());
-            let path = env::temp_dir().join(format!(
-                "ck-release-{}-{nanos}-{}",
-                process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
     }
 }

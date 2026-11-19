@@ -5,6 +5,8 @@
 #
 #   ck_platform_env              compilers and flags, after ck_hermetic_env
 #   ck_platform_shlib_ext        prints the shared library suffix: dylib
+#   ck_platform_null_dir         prints the null folder for baked defaults
+#   ck_platform_mtime <file>     prints the file's mtime in Unix seconds
 #   ck_platform_rpath <folder>   prints the relocated library search path for
 #                                a file in the archive's bin/, ext/ or lib/
 #
@@ -60,4 +62,23 @@ ck_platform_rpath() {
     lib) echo '@loader_path' ;;
     *) ck_die "ck_platform_rpath: not bin, ext or lib: ${1:-}" ;;
   esac
+}
+
+# ck_platform_null_dir: prints the folder that the defaults read at every
+# start point into: OpenSSL's config folder, and PHP's ini path and scan
+# folder. No account can create it, so opening a file there always gives
+# ENOENT, the "no config file" case both handle.
+ck_platform_null_dir() {
+  echo /System/ck-dev-none
+}
+
+# ck_platform_mtime <file>: prints the file's modification time in seconds
+# since the epoch.
+ck_platform_mtime() {
+  local mtime
+  mtime=$(stat -f %m "${1:-}") || ck_die "cannot read the mtime of ${1:-}"
+  case "$mtime" in
+    '' | *[!0-9]*) ck_die "not an mtime for ${1:-}: $mtime" ;;
+  esac
+  echo "$mtime"
 }

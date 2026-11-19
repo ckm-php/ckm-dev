@@ -15,9 +15,9 @@
 # - macOS: strip debug info, then @rpath install names, one LC_RPATH of
 #   @loader_path/../lib (bin, ext) or @loader_path (lib), then an ad-hoc
 #   signature, since changing a load command breaks the old one.
-# - etc/php.ini-{development,production}, etc/ssl/cert.pem, licenses/,
-#   ck-runtime.json; mode 0755 for folders and object files, 0644 for the
-#   rest.
+# - etc/php.ini-{development,production}, etc/ssl/cert.pem, licenses/
+#   (with PHP's README.REDIST.BINS), ck-runtime.json (with the runner
+#   image); mode 0755 for folders and object files, 0644 for the rest.
 #
 # Call the functions as plain commands, never in an `if`, `&&` or `||`.
 
@@ -189,8 +189,9 @@ ck_relocate_macos() {
   done
 }
 
-# ck_php_licenses <root>: licenses/php/ (PHP's LICENSE and the licences of
-# the code PHP bundles, flattened to one folder), licenses/<library>/ for
+# ck_php_licenses <root>: licenses/php/ (PHP's LICENSE, README.REDIST.BINS
+# with the notices of the code PHP bundles into its binaries, and the
+# licences of that code, flattened to one folder), licenses/<library>/ for
 # each linked library, licenses/cacert/NOTICE.
 ck_php_licenses() {
   local root=$1 src list rel name version dest saved
@@ -199,6 +200,8 @@ ck_php_licenses() {
   ck_run mkdir -p "$dest"
   [ -f "$src/LICENSE" ] || ck_die "relocate: no LICENSE in $src"
   ck_run cp "$src/LICENSE" "$dest/LICENSE"
+  [ -f "$src/README.REDIST.BINS" ] || ck_die "relocate: no README.REDIST.BINS in $src"
+  ck_run cp "$src/README.REDIST.BINS" "$dest/README.REDIST.BINS"
   list=$(cd "$src" && find . \( -name tests -o -name test \) -prune -o -type f \
     \( -name 'LICENSE*' -o -name 'LICENCE*' -o -name 'COPYING*' \) -print | LC_ALL=C sort) ||
     ck_die "relocate: cannot list licence files in $src"
@@ -257,11 +260,23 @@ ck_json_list() {
   printf ']'
 }
 
+# ck_php_runner: prints the GitHub runner image that runs the build, as
+# <ImageOS>/<ImageVersion> (the runner-images release tag), or unknown
+# outside a GitHub runner.
+# shellcheck disable=SC2154 # ImageOS and ImageVersion come from the runner
+ck_php_runner() {
+  if [ -n "${ImageOS:-}" ] && [ -n "${ImageVersion:-}" ]; then
+    printf '%s/%s\n' "$ImageOS" "$ImageVersion"
+  else
+    echo unknown
+  fi
+}
+
 # ck_php_runtime_json <root>: writes <root>/ck-runtime.json.
 ck_php_runtime_json() {
-  local root=$1 os cpu toolchain baseline name version sha license sep='' cacert_sha
+  local root=$1 os cpu toolchain baseline name version sha license sep='' cacert_sha runner
   local s_release s_php s_line s_os s_cpu s_api s_tool s_src l_builtin l_default l_optional l_patches
-  local s_name s_version s_license s_sha libs='' s_ca_version s_ca_sha s_ca_license
+  local s_name s_version s_license s_sha libs='' s_ca_version s_ca_sha s_ca_license s_runner
   os=$(ck_os)
   cpu=$(ck_cpu)
   toolchain=$("$CC" --version) || ck_die "relocate: $CC --version failed"
@@ -278,6 +293,8 @@ ck_php_runtime_json() {
   s_cpu=$(ck_json_str "$cpu") || exit 1
   s_api=$(ck_json_str "$CK_PHP_MODULE_API") || exit 1
   s_tool=$(ck_json_str "$toolchain") || exit 1
+  runner=$(ck_php_runner) || exit 1
+  s_runner=$(ck_json_str "$runner") || exit 1
   s_src=$(ck_json_str "$CK_PHP_SOURCE_SHA256") || exit 1
   l_builtin=$(ck_json_list "$CK_PHP_BUILTIN") || exit 1
   l_default=$(ck_json_list "$CK_PHP_DEFAULT") || exit 1
@@ -319,7 +336,8 @@ ck_php_runtime_json() {
   ],
   "ca_bundle": {"version": $s_ca_version, "license": $s_ca_license, "sha256": $s_ca_sha},
   "baseline": $baseline,
-  "toolchain": $s_tool
+  "toolchain": $s_tool,
+  "runner": $s_runner
 }
 EOF
 }

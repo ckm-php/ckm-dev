@@ -7,9 +7,10 @@
 # (ck_platform_env) only while its command line holds no compiler or linker
 # flag, so only the target and options go there.
 #
-# - OPENSSLDIR, the default config file and CA store, is <prefix>/ssl: under
-#   the build root, which only root can create on a user's machine. Nothing
-#   is installed there; PHP gets its CA bundle from openssl.cafile.
+# - OPENSSLDIR, the default config file and CA store that libcrypto reads at
+#   every start, is <null folder>/ssl (ck_platform_null_dir), which no account
+#   can create, so the "no config file" default always holds. install_sw
+#   writes nothing there; PHP gets its CA bundle from openssl.cafile.
 # - 3.x: no-module builds the legacy provider into libcrypto, so loading it
 #   needs no module path, and no engine or provider files are built.
 #   no-docs skips the man pages.
@@ -20,7 +21,7 @@
 #   c_rehash are removed again, so they never shadow the system's on the
 #   hermetic PATH, where <prefix>/bin comes first.
 ck_dep_openssl() {
-  local version src jobs os cpu target
+  local version src jobs os cpu target null
   local -a args
   version=$(ck_dep_version openssl)
   if ck_dep_is_built openssl "$version"; then return 0; fi
@@ -33,10 +34,11 @@ ck_dep_openssl() {
     macos-x86_64) target=darwin64-x86_64-cc ;;
     *) ck_die "deps: no OpenSSL target for $os-$cpu" ;;
   esac
+  null=$(ck_platform_null_dir)
   args=(
     "$target"
     --prefix="$CK_DEPS_PREFIX"
-    --openssldir="$CK_DEPS_PREFIX/ssl"
+    --openssldir="$null/ssl"
     --libdir=lib
     shared
     no-tests

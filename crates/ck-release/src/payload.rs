@@ -1,80 +1,338 @@
-//! Turns descriptors into an unsigned catalog payload (`ck-core`'s schema 1).
+//! The unsigned catalog payload (`ck-core`'s schema 1): built from the
+//! downloaded release files, and read back for signing.
 //!
-//! The payload groups descriptors by name and version into one runtime each,
-//! with one artifact per OS and CPU. Each artifact URL is
-//! `<base url>/<descriptor file>`. Before it returns, [`build`] parses its
-//! own output again with `ck_core::catalog::schema::parse` and checks every
-//! URL with the given transport policy; the CLI always passes the release
-//! rules (`TransportPolicy::current(Profile::Standard)`).
+//! `--releases <dir>` holds one folder per runtime release, named by its tag
+//! `<name>-<version>` (D25), as `gh release download <tag> -D <dir>/<tag>`
+//! writes it: the archives, their descriptors and `SHA256SUMS`. [`build`]
+//! measures each archive's SHA256 and size, which must equal its descriptor
+//! and `SHA256SUMS`, then [`assemble`]s the payload.
+//!
+//! [`assemble`] groups descriptors by name and version into one runtime each,
+//! with one artifact per OS and CPU. Each artifact URL is [`artifact_url`]:
+//! `<prefix><name>-<version>/<file>`, where the prefix ends in
+//! `/releases/download/`. Before it returns, [`assemble`] parses its own
+//! output again with `ck_core::catalog::schema::parse` and checks every URL
+//! with the given transport policy; the CLI always passes the release rules
+//! (`TransportPolicy::current(Profile::Standard)`) and
+//! [`release_prefix`](crate::release_prefix).
 
-use std::collections::{BTreeMap, HashSet};
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ck_core::catalog::schema::{self, Artifact, Payload, Runtime, RuntimeName, RuntimeVersion};
+use ck_core::catalog::schema::{
+    self, Artifact, Payload, Platform, Runtime, RuntimeName, RuntimeVersion, Sha256Digest,
+};
 use ck_core::download::policy::TransportPolicy;
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use url::Url;
 
-use crate::{Descriptor, Error, Result, lock, to_pretty_json};
+use crate::{Descriptor, Error, Result, asset_file_name, lock, to_pretty_json};
 
-/// The inputs besides the descriptors.
+/// What every artifact URL prefix ends with.
+const RELEASE_DOWNLOAD: &str = "/releases/download/";
+
+/// The inputs besides the release files.
 #[derive(Debug, Clone)]
 pub struct PayloadSpec<'a> {
-    /// The release download folder, with no trailing `/`, for example
-    /// `https://github.com/<owner>/<repo>/releases/download/<tag>`.
-    pub base_url: &'a str,
+    /// The release download folder, ending in `/releases/download/`, for
+    /// example `https://github.com/ckm-php/ckm-dev/releases/download/`.
+    pub prefix: &'a str,
     /// Higher than every catalog published before.
     pub sequence: u64,
     /// Unix seconds.
     pub expires: u64,
 }
 
-/// Reads every `*.json` file in `dir` as a [`Descriptor`], sorted by file
-/// name. Any other entry in `dir` is an error.
-pub fn read_descriptors(dir: &Path) -> Result<Vec<Descriptor>> {
-    let mut paths = Vec::new();
-    for item in fs::read_dir(dir).map_err(|e| Error::io("list", dir, e))? {
-        let item = item.map_err(|e| Error::io("list", dir, e))?;
-        let path = item.path();
-        // `file_type` does not follow links, so a link is refused too.
-        let is_file = item
-            .file_type()
-            .map_err(|e| Error::io("read", &path, e))?
-            .is_file();
-        if !is_file || path.extension() != Some("json".as_ref()) {
+/// Measures the release files under `releases` (see the module notes) and
+/// [`assemble`]s the payload from what was measured.
+///
+/// Refuses, besides what [`assemble`] refuses: a folder whose name is not
+/// the tag of its descriptors, an archive whose SHA256 or size differs from
+/// its descriptor or from `SHA256SUMS`, and any file or folder that is not an
+/// archive, a descriptor or `SHA256SUMS`. `SHA256SUMS` lists every archive
+/// once and nothing else, in `sha256sum`'s text form with LF line ends.
+pub fn build(releases: &Path, spec: &PayloadSpec<'_>, policy: &TransportPolicy) -> Result<Payload> {
+    let descriptors = read_releases(releases)?;
+    assemble(&descriptors, spec, policy)
+}
+
+/// The descriptors found under `releases`, each with the SHA256 and size
+/// measured from its archive, sorted by name, version, OS and CPU.
+fn read_releases(releases: &Path) -> Result<Vec<Descriptor>> {
+    let metadata = fs::symlink_metadata(releases).map_err(|e| Error::io("read", releases, e))?;
+    if !metadata.is_dir() {
+        return Err(Error::Invalid(format!(
+            "{} is not a folder (a link to one is refused)",
+            releases.display()
+        )));
+    }
+    let mut descriptors = Vec::new();
+    for (tag, folder, metadata) in entries(releases)? {
+        if !metadata.is_dir() {
             return Err(Error::Invalid(format!(
-                "{} is not a descriptor (a *.json file)",
+                "{} is not a release folder: `--releases` holds only one folder per tag \
+                 (links are refused)",
+                folder.display()
+            )));
+        }
+        descriptors.extend(read_release(&tag, &folder)?);
+    }
+    if descriptors.is_empty() {
+        return Err(Error::Invalid(format!(
+            "{} holds no release folder",
+            releases.display()
+        )));
+    }
+    descriptors.sort_by(|a, b| {
+        (
+            a.name.as_str(),
+            a.version.as_str(),
+            a.os.as_str(),
+            a.cpu.as_str(),
+        )
+            .cmp(&(
+                b.name.as_str(),
+                b.version.as_str(),
+                b.os.as_str(),
+                b.cpu.as_str(),
+            ))
+    });
+    Ok(descriptors)
+}
+
+/// The release file names besides the archives and their descriptors.
+const SUMS: &str = "SHA256SUMS";
+const ARCHIVE_SUFFIX: &str = ".tar.gz";
+const DESCRIPTOR_SUFFIX: &str = ".json";
+/// `SHA256SUMS` lists a few archives; a larger file is not one.
+const MAX_SUMS_BYTES: u64 = 64 * 1024;
+
+/// One release folder, named by its tag: the archives, a descriptor
+/// `<stem>.json` for each archive `<stem>.tar.gz`, and `SHA256SUMS`.
+fn read_release(tag: &str, folder: &Path) -> Result<Vec<Descriptor>> {
+    // Names are matched as strings: `Path::file_stem` would cut a version
+    // such as `8.5.12-ck1` at its first dot.
+    let mut archives = BTreeSet::new();
+    let mut described = BTreeSet::new();
+    let mut has_sums = false;
+    for (name, path, metadata) in entries(folder)? {
+        if !metadata.is_file() {
+            return Err(Error::Invalid(format!(
+                "{} is not a regular file (folders and links are refused)",
                 path.display()
             )));
         }
-        paths.push(path);
+        if name == SUMS {
+            has_sums = true;
+        } else if let Some(stem) = name.strip_suffix(ARCHIVE_SUFFIX) {
+            archives.insert(stem.to_owned());
+        } else if let Some(stem) = name.strip_suffix(DESCRIPTOR_SUFFIX) {
+            described.insert(stem.to_owned());
+        } else {
+            return Err(Error::Invalid(format!(
+                "{} is not an archive (`{ARCHIVE_SUFFIX}`), a descriptor \
+                 (`{DESCRIPTOR_SUFFIX}`) or {SUMS}",
+                path.display()
+            )));
+        }
     }
-    if paths.is_empty() {
+    if archives.is_empty() {
         return Err(Error::Invalid(format!(
-            "{} holds no descriptors",
-            dir.display()
+            "{} holds no archive",
+            folder.display()
         )));
     }
-    paths.sort();
-    paths
-        .iter()
-        .map(PathBuf::as_path)
-        .map(Descriptor::read)
-        .collect()
+    if let Some(stem) = archives.difference(&described).next() {
+        return Err(Error::Invalid(format!(
+            "{} has no descriptor {stem}{DESCRIPTOR_SUFFIX}",
+            folder.join(format!("{stem}{ARCHIVE_SUFFIX}")).display()
+        )));
+    }
+    if let Some(stem) = described.difference(&archives).next() {
+        return Err(Error::Invalid(format!(
+            "{} has no archive {stem}{ARCHIVE_SUFFIX}",
+            folder.join(format!("{stem}{DESCRIPTOR_SUFFIX}")).display()
+        )));
+    }
+    let sums_path = folder.join(SUMS);
+    if !has_sums {
+        return Err(Error::Invalid(format!(
+            "{} is missing",
+            sums_path.display()
+        )));
+    }
+
+    let mut listed = BTreeMap::new();
+    for (line, name, digest) in read_sums(&sums_path)? {
+        let known = name
+            .strip_suffix(ARCHIVE_SUFFIX)
+            .is_some_and(|stem| archives.contains(stem));
+        if !known {
+            return Err(Error::Invalid(format!(
+                "{}: line {line} lists a file that is not an archive in this folder",
+                sums_path.display()
+            )));
+        }
+        if listed.insert(name, digest).is_some() {
+            return Err(Error::Invalid(format!(
+                "{}: line {line} lists an archive a second time",
+                sums_path.display()
+            )));
+        }
+    }
+
+    let mut descriptors = Vec::new();
+    for stem in &archives {
+        let file = format!("{stem}{ARCHIVE_SUFFIX}");
+        let archive = folder.join(&file);
+        let descriptor_path = folder.join(format!("{stem}{DESCRIPTOR_SUFFIX}"));
+        let mut descriptor = Descriptor::read(&descriptor_path)?;
+        if descriptor.file != file {
+            return Err(Error::Invalid(format!(
+                "{}: it describes {:?}, not {file:?}",
+                descriptor_path.display(),
+                descriptor.file
+            )));
+        }
+        let expected_tag = format!("{}-{}", descriptor.name, descriptor.version);
+        if tag != expected_tag {
+            return Err(Error::Invalid(format!(
+                "{}: {} {} belongs in a folder named {expected_tag:?}, not {tag:?}",
+                descriptor_path.display(),
+                descriptor.name,
+                descriptor.version
+            )));
+        }
+        let Some(&summed) = listed.get(&file) else {
+            return Err(Error::Invalid(format!(
+                "{} does not list {file}",
+                sums_path.display()
+            )));
+        };
+
+        let (sha256, size) = measure(&archive)?;
+        if size != descriptor.size {
+            return Err(Error::Invalid(format!(
+                "{}: it has {size} bytes, but its descriptor says {}",
+                archive.display(),
+                descriptor.size
+            )));
+        }
+        if sha256 != descriptor.sha256 {
+            return Err(Error::Invalid(format!(
+                "{}: its SHA256 is {sha256}, but its descriptor says {}",
+                archive.display(),
+                descriptor.sha256
+            )));
+        }
+        if sha256 != summed {
+            return Err(Error::Invalid(format!(
+                "{}: its SHA256 is {sha256}, but {SUMS} says {summed}",
+                archive.display()
+            )));
+        }
+        descriptor.sha256 = sha256;
+        descriptor.size = size;
+        descriptors.push(descriptor);
+    }
+    Ok(descriptors)
 }
 
-/// Builds and checks the payload.
+/// The lines of a `SHA256SUMS` file as `sha256sum` writes them in text mode:
+/// `<64 lower-case hex>  <file>`, each ending in LF. Returns each line's
+/// number, file name and digest. Errors give the line number only, never the
+/// line.
+fn read_sums(path: &Path) -> Result<Vec<(usize, String, Sha256Digest)>> {
+    let invalid = |reason: String| Error::Invalid(format!("{}: {reason}", path.display()));
+    let size = fs::symlink_metadata(path)
+        .map_err(|e| Error::io("read", path, e))?
+        .len();
+    if size > MAX_SUMS_BYTES {
+        return Err(invalid(format!("it is larger than {MAX_SUMS_BYTES} bytes")));
+    }
+    let bytes = fs::read(path).map_err(|e| Error::io("read", path, e))?;
+    let text = String::from_utf8(bytes).map_err(|_| invalid("it is not UTF-8".to_owned()))?;
+    let Some(body) = text.strip_suffix('\n') else {
+        return Err(invalid("it must end in a line feed".to_owned()));
+    };
+    let mut lines = Vec::new();
+    for (index, line) in body.split('\n').enumerate() {
+        let number = index + 1;
+        let malformed = || {
+            invalid(format!(
+                "line {number} is not `<64 lower-case hex>  <file>`"
+            ))
+        };
+        if line.contains('\r') {
+            return Err(invalid(format!(
+                "line {number} holds a carriage return (lines end in LF only)"
+            )));
+        }
+        let Some((hex, name)) = line.split_once("  ") else {
+            return Err(malformed());
+        };
+        let digest = Sha256Digest::from_hex(hex).map_err(|_| malformed())?;
+        if name.is_empty() {
+            return Err(malformed());
+        }
+        lines.push((number, name.to_owned(), digest));
+    }
+    Ok(lines)
+}
+
+/// The entries of `folder` with their own metadata (links are not
+/// followed), sorted by name. Refuses a name that is not UTF-8.
+fn entries(folder: &Path) -> Result<Vec<(String, PathBuf, fs::Metadata)>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(folder).map_err(|e| Error::io("list", folder, e))? {
+        let entry = entry.map_err(|e| Error::io("list", folder, e))?;
+        let path = entry.path();
+        let Ok(name) = entry.file_name().into_string() else {
+            return Err(Error::Invalid(format!(
+                "{}: the name is not UTF-8",
+                path.display()
+            )));
+        };
+        let metadata = fs::symlink_metadata(&path).map_err(|e| Error::io("read", &path, e))?;
+        entries.push((name, path, metadata));
+    }
+    entries.sort_by(|(a, ..), (b, ..)| a.cmp(b));
+    Ok(entries)
+}
+
+/// The SHA256 and size of the file at `path`, measured by streaming it.
+pub(crate) fn measure(path: &Path) -> Result<(Sha256Digest, u64)> {
+    let mut file = File::open(path).map_err(|e| Error::io("open", path, e))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 64 * 1024];
+    let mut size: u64 = 0;
+    loop {
+        let read = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(Error::io("read", path, error)),
+        };
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok((Sha256Digest::from_bytes(hasher.finalize().into()), size))
+}
+
+/// Builds and checks the payload from descriptors whose hashes and sizes are
+/// trusted.
 ///
 /// Refuses no descriptors, an expiry that is not in the future, two
 /// descriptors for one name, version (ignoring case, as `ck-core` compares
 /// them), OS and CPU, one name and version with two licences, and any URL
-/// that is not `<base url>/<file>` in normal form with no query or fragment,
-/// or that `policy` refuses as a first hop. Runtimes are sorted by name and
-/// version, and artifacts by OS and CPU.
-pub fn build(
+/// [`artifact_url`] refuses. Runtimes are sorted by name and version, and
+/// artifacts by OS and CPU.
+pub fn assemble(
     descriptors: &[Descriptor],
     spec: &PayloadSpec<'_>,
     policy: &TransportPolicy,
@@ -109,7 +367,13 @@ pub fn build(
                 "{what} has more than one descriptor (versions compare ignoring case)"
             )));
         }
-        let url = artifact_url(spec.base_url, &descriptor.file, policy)?;
+        let url = artifact_url(
+            spec.prefix,
+            &descriptor.name,
+            &descriptor.version,
+            descriptor.platform(),
+            policy,
+        )?;
         let runtime = runtimes
             .entry((descriptor.name.clone(), descriptor.version.clone()))
             .or_insert_with(|| Runtime {
@@ -159,14 +423,26 @@ pub fn build(
     Ok(payload)
 }
 
-/// `<base>/<file>`, checked.
-fn artifact_url(base: &str, file: &str, policy: &TransportPolicy) -> Result<String> {
-    if base.ends_with('/') {
+/// `<prefix><name>-<version>/<file>`, where `<file>` is
+/// [`asset_file_name`]: the URL of one archive on its runtime release.
+///
+/// Refuses a prefix that does not end in `/releases/download/`, and a URL
+/// that is not in normal form, has a query or fragment, or that `policy`
+/// refuses as a first hop.
+pub fn artifact_url(
+    prefix: &str,
+    name: &RuntimeName,
+    version: &RuntimeVersion,
+    platform: Platform,
+    policy: &TransportPolicy,
+) -> Result<String> {
+    if !prefix.ends_with(RELEASE_DOWNLOAD) {
         return Err(Error::Invalid(format!(
-            "the base URL {base:?} must not end in '/'"
+            "the release prefix {prefix:?} must end in {RELEASE_DOWNLOAD:?}"
         )));
     }
-    let text = format!("{base}/{file}");
+    let file = asset_file_name(name, version, platform);
+    let text = format!("{prefix}{name}-{version}/{file}");
     let url = Url::parse(&text)
         .map_err(|error| Error::Invalid(format!("the URL {text:?} does not parse: {error}")))?;
     if url.as_str() != text {
@@ -180,13 +456,29 @@ fn artifact_url(base: &str, file: &str, policy: &TransportPolicy) -> Result<Stri
             "the URL {text:?} must have no query or fragment"
         )));
     }
-    if url.path_segments().and_then(Iterator::last) != Some(file) {
-        return Err(Error::Invalid(format!(
-            "the URL {text:?} must end in the file name {file:?}"
-        )));
-    }
     policy.check_first(&url)?;
     Ok(text)
+}
+
+/// Checks that every artifact URL in `payload` is exactly the
+/// [`artifact_url`] of its runtime and platform under `prefix`.
+pub fn check_urls(payload: &Payload, prefix: &str, policy: &TransportPolicy) -> Result<()> {
+    for runtime in &payload.runtimes {
+        for artifact in &runtime.artifacts {
+            let platform = Platform {
+                os: artifact.os,
+                arch: artifact.arch,
+            };
+            let expected = artifact_url(prefix, &runtime.name, &runtime.version, platform, policy)?;
+            if artifact.url != expected {
+                return Err(Error::Invalid(format!(
+                    "{} {} for {platform}: the URL {:?} is not {expected:?}",
+                    runtime.name, runtime.version, artifact.url
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reads an RFC 3339 time, such as `2027-01-31T00:00:00Z`, as Unix seconds.
@@ -201,20 +493,52 @@ pub fn parse_expires(text: &str) -> Result<u64> {
 }
 
 /// Writes `payload` to `out` as two-space JSON with a trailing newline, the
-/// form the owner reviews as a diff.
+/// form the owner reviews as a diff and the bytes that get signed.
 pub fn write(payload: &Payload, out: &Path) -> Result<()> {
     lock::write_atomic(out, &to_pretty_json(payload)?)
 }
 
+/// Reads a payload file for `sign` and `assets verify`, and returns its exact
+/// bytes and what they parse to.
+///
+/// The bytes must parse with `ck_core::catalog::schema::parse` and be in
+/// canonical form: byte for byte what [`write`] writes for them, with one
+/// entry per name and version, runtimes sorted by name and version, and
+/// artifacts by OS and CPU, as [`assemble`] orders them.
+pub fn read(path: &Path) -> Result<(Vec<u8>, Payload)> {
+    let bytes = fs::read(path).map_err(|e| Error::io("read", path, e))?;
+    let payload = schema::parse(&bytes)
+        .map_err(|error| Error::Invalid(format!("{}: {error}", path.display())))?;
+    let canonical = to_pretty_json(&payload)?;
+    let sorted = payload
+        .runtimes
+        .windows(2)
+        .all(|pair| (&pair[0].name, &pair[0].version) < (&pair[1].name, &pair[1].version))
+        && payload.runtimes.iter().all(|runtime| {
+            runtime
+                .artifacts
+                .is_sorted_by_key(|artifact| (artifact.os.as_str(), artifact.arch.as_str()))
+        });
+    if bytes != canonical || !sorted {
+        return Err(Error::Invalid(format!(
+            "{} is not in the canonical form `payload build` writes",
+            path.display()
+        )));
+    }
+    Ok((bytes, payload))
+}
+
+/// Shared with `assets`' tests, which read the same release folders.
 #[cfg(test)]
-mod tests {
-    use ck_core::catalog::schema::{Arch, ArchiveFormat, Os, Platform, Sha256Digest};
+pub(crate) mod tests {
+    use ck_core::catalog::schema::{Arch, ArchiveFormat, Os};
     use ck_core::paths::Profile;
 
     use super::*;
-    use crate::{DESCRIPTOR_SCHEMA, asset_file_name};
+    use crate::DESCRIPTOR_SCHEMA;
+    use crate::test_support::TempDir;
 
-    const BASE: &str = "https://github.com/owner/repo/releases/download/php-build-1";
+    pub(crate) const PREFIX: &str = "https://github.com/owner/repo/releases/download/";
 
     /// 2100-01-01T00:00:00Z.
     const EXPIRES: u64 = 4_102_444_800;
@@ -237,9 +561,9 @@ mod tests {
         }
     }
 
-    fn spec(base_url: &str) -> PayloadSpec<'_> {
+    pub(crate) fn spec(prefix: &str) -> PayloadSpec<'_> {
         PayloadSpec {
-            base_url,
+            prefix,
             sequence: 3,
             expires: EXPIRES,
         }
@@ -247,7 +571,7 @@ mod tests {
 
     /// The release rules, which a debug build also applies outside a test
     /// profile.
-    fn release() -> TransportPolicy {
+    pub(crate) fn release() -> TransportPolicy {
         TransportPolicy::current(Profile::Standard)
     }
 
@@ -259,7 +583,7 @@ mod tests {
             descriptor("7.4.33-ck1", Os::Linux, Arch::X86_64),
             descriptor("8.5.12-ck1", Os::Linux, Arch::X86_64),
         ];
-        let payload = build(&descriptors, &spec(BASE), &release()).unwrap();
+        let payload = assemble(&descriptors, &spec(PREFIX), &release()).unwrap();
         assert_eq!(
             (payload.schema, payload.sequence, payload.expires),
             (schema::SCHEMA, 3, EXPIRES)
@@ -277,24 +601,24 @@ mod tests {
                 })
             })
             .collect();
-        let url = |file: &str| format!("{BASE}/{file}");
+        let url = |tag: &str, platform: &str| format!("{PREFIX}{tag}/{tag}-{platform}.tar.gz");
         assert_eq!(
             listed,
             [
                 (
                     "7.4.33-ck1",
                     "PHP-3.01",
-                    url("php-7.4.33-ck1-linux-x86_64.tar.gz").as_str()
+                    url("php-7.4.33-ck1", "linux-x86_64").as_str()
                 ),
                 (
                     "8.5.12-ck1",
                     "PHP-3.01",
-                    url("php-8.5.12-ck1-linux-x86_64.tar.gz").as_str()
+                    url("php-8.5.12-ck1", "linux-x86_64").as_str()
                 ),
                 (
                     "8.5.12-ck1",
                     "PHP-3.01",
-                    url("php-8.5.12-ck1-macos-aarch64.tar.gz").as_str()
+                    url("php-8.5.12-ck1", "macos-aarch64").as_str()
                 ),
             ]
         );
@@ -303,26 +627,44 @@ mod tests {
             payload
         );
 
-        let result = build(
+        check_urls(&payload, PREFIX, &release()).unwrap();
+
+        let result = assemble(
             &descriptors,
-            &spec("https://example.com/owner/repo/releases/download/php-build-1"),
+            &spec("https://example.com/owner/repo/releases/download/"),
             &release(),
         );
         assert!(
             matches!(result, Err(Error::Core(ck_core::Error::UrlRefused { .. }))),
             "{result:?}"
         );
-        for base in [
-            "http://github.com/owner/repo/releases/download/php-build-1",
-            "https://github.com.evil.com/owner/repo/releases/download/php-build-1",
-            "http://127.0.0.1:8080",
-            "https://github.com/owner/repo/releases/download/php-build-1/",
-            "https://github.com/owner/repo/releases/download/php-build-1?x=1",
-            "https://GitHub.com/owner/repo/releases/download/php-build-1",
+        for prefix in [
+            "http://github.com/owner/repo/releases/download/",
+            "https://github.com.evil.com/owner/repo/releases/download/",
+            "http://127.0.0.1:8080/releases/download/",
+            "https://github.com/owner/repo/releases/download",
+            "https://github.com/owner/repo/releases/",
+            "https://github.com/owner/repo/releases/download/?x=1/releases/download/",
+            "https://GitHub.com/owner/repo/releases/download/",
+            "https://github.com/owner/repo/../releases/download/",
         ] {
-            let result = build(&descriptors, &spec(base), &release());
-            assert!(result.is_err(), "{base}: {result:?}");
+            let result = assemble(&descriptors, &spec(prefix), &release());
+            assert!(result.is_err(), "{prefix}: {result:?}");
         }
+
+        // A URL that is not exactly where `assemble` puts it.
+        let mut moved = payload.clone();
+        moved.runtimes[0].artifacts[0].url =
+            format!("{PREFIX}php-8.5.12-ck1/php-7.4.33-ck1-linux-x86_64.tar.gz");
+        assert!(check_urls(&moved, PREFIX, &release()).is_err());
+        assert!(
+            check_urls(
+                &payload,
+                "https://github.com/other/repo/releases/download/",
+                &release()
+            )
+            .is_err()
+        );
 
         assert_eq!(
             parse_expires("2027-01-31T00:00:00Z").unwrap(),
@@ -352,14 +694,211 @@ mod tests {
             ("no descriptors", Vec::new()),
         ];
         for (case, descriptors) in cases {
-            let result = build(&descriptors, &spec(BASE), &release());
+            let result = assemble(&descriptors, &spec(PREFIX), &release());
             assert!(result.is_err(), "{case}: {result:?}");
         }
 
         let past = PayloadSpec {
             expires: 1_000_000_000,
-            ..spec(BASE)
+            ..spec(PREFIX)
         };
-        assert!(build(&[linux], &past, &release()).is_err());
+        assert!(assemble(&[linux], &past, &release()).is_err());
+    }
+
+    #[test]
+    fn only_a_payload_in_canonical_form_reads_back() {
+        let temp = TempDir::new();
+        let descriptors = [
+            descriptor("8.5.12-ck1", Os::Linux, Arch::X86_64),
+            descriptor("8.5.12-ck1", Os::Macos, Arch::Aarch64),
+            descriptor("7.4.33-ck1", Os::Linux, Arch::X86_64),
+        ];
+        let payload = assemble(&descriptors, &spec(PREFIX), &release()).unwrap();
+        let path = temp.0.join("payload-v1.json");
+        write(&payload, &path).unwrap();
+        let (bytes, read_back) = read(&path).unwrap();
+        assert_eq!(bytes, fs::read(&path).unwrap());
+        assert_eq!(read_back, payload);
+
+        let compact = serde_json::to_vec(&payload).unwrap();
+        let mut swapped = payload.clone();
+        swapped.runtimes.swap(0, 1);
+        let mut artifacts_swapped = payload.clone();
+        artifacts_swapped.runtimes[1].artifacts.swap(0, 1);
+        let mut no_newline = to_pretty_json(&payload).unwrap();
+        no_newline.pop();
+        for (case, bytes) in [
+            ("compact JSON", compact),
+            ("runtimes out of order", to_pretty_json(&swapped).unwrap()),
+            (
+                "artifacts out of order",
+                to_pretty_json(&artifacts_swapped).unwrap(),
+            ),
+            ("no trailing newline", no_newline),
+        ] {
+            fs::write(&path, bytes).unwrap();
+            let result = read(&path);
+            assert!(result.is_err(), "{case}: {result:?}");
+        }
+    }
+
+    pub(crate) const LINUX_8_5: &[u8] = b"php 8.5 for linux x86_64";
+    pub(crate) const MACOS_8_5: &[u8] = b"php 8.5 for macos aarch64";
+    pub(crate) const LINUX_7_4: &[u8] = b"php 7.4 for linux x86_64";
+
+    /// Writes the folder `<root>/php-<version>` as `gh release download`
+    /// leaves it: each archive, its descriptor and `SHA256SUMS`.
+    fn write_release(root: &Path, version: &str, archives: &[(Os, Arch, &[u8])]) -> PathBuf {
+        let name = RuntimeName::new("php").unwrap();
+        let version = RuntimeVersion::new(version).unwrap();
+        let folder = root.join(format!("{name}-{version}"));
+        fs::create_dir_all(&folder).unwrap();
+        let mut sums = String::new();
+        for &(os, cpu, bytes) in archives {
+            let file = asset_file_name(&name, &version, Platform { os, arch: cpu });
+            fs::write(folder.join(&file), bytes).unwrap();
+            let sha256 = Sha256Digest::of(bytes);
+            let stem = file.strip_suffix(".tar.gz").unwrap();
+            Descriptor {
+                schema: DESCRIPTOR_SCHEMA,
+                name: name.clone(),
+                version: version.clone(),
+                license: "PHP-3.01".to_owned(),
+                os,
+                cpu,
+                file: file.clone(),
+                sha256,
+                size: bytes.len() as u64,
+                format: ArchiveFormat::TarGz,
+            }
+            .write(&folder.join(format!("{stem}.json")))
+            .unwrap();
+            sums.push_str(&format!("{sha256}  {file}\n"));
+        }
+        fs::write(folder.join("SHA256SUMS"), sums).unwrap();
+        folder
+    }
+
+    /// `<root>/releases` with two releases, 8.5.12-ck1 for two platforms and
+    /// 7.4.33-ck1 for one.
+    pub(crate) fn good_releases(root: &Path) -> PathBuf {
+        let releases = root.join("releases");
+        write_release(
+            &releases,
+            "8.5.12-ck1",
+            &[
+                (Os::Linux, Arch::X86_64, LINUX_8_5),
+                (Os::Macos, Arch::Aarch64, MACOS_8_5),
+            ],
+        );
+        write_release(
+            &releases,
+            "7.4.33-ck1",
+            &[(Os::Linux, Arch::X86_64, LINUX_7_4)],
+        );
+        releases
+    }
+
+    /// Changes one byte of the file and keeps its length.
+    pub(crate) fn flip_first_byte(path: &Path) {
+        let mut bytes = fs::read(path).unwrap();
+        bytes[0] ^= 1;
+        fs::write(path, bytes).unwrap();
+    }
+
+    // T3
+    #[test]
+    fn the_payload_holds_the_sizes_and_hashes_measured_from_the_release_files() {
+        let temp = TempDir::new();
+        let releases = good_releases(&temp.0);
+        let payload = build(&releases, &spec(PREFIX), &release()).unwrap();
+        let listed: Vec<(&str, &str, Sha256Digest, u64)> = payload
+            .runtimes
+            .iter()
+            .flat_map(|runtime| {
+                runtime.artifacts.iter().map(|artifact| {
+                    (
+                        runtime.version.as_str(),
+                        artifact.os.as_str(),
+                        artifact.sha256,
+                        artifact.size,
+                    )
+                })
+            })
+            .collect();
+        let measured = |bytes: &[u8]| (Sha256Digest::of(bytes), bytes.len() as u64);
+        let expected: Vec<(&str, &str, Sha256Digest, u64)> = [
+            ("7.4.33-ck1", "linux", LINUX_7_4),
+            ("8.5.12-ck1", "linux", LINUX_8_5),
+            ("8.5.12-ck1", "macos", MACOS_8_5),
+        ]
+        .into_iter()
+        .map(|(version, os, bytes)| {
+            let (sha256, size) = measured(bytes);
+            (version, os, sha256, size)
+        })
+        .collect();
+        assert_eq!(listed, expected);
+        check_urls(&payload, PREFIX, &release()).unwrap();
+    }
+
+    // T3
+    #[test]
+    fn payload_build_refuses_a_mismatch_a_stray_file_and_a_wrong_folder() {
+        let tag = "php-8.5.12-ck1";
+        let linux = "php-8.5.12-ck1-linux-x86_64";
+        refuses(
+            "a one-byte change in an archive",
+            "but its descriptor says",
+            |releases| flip_first_byte(&releases.join(tag).join(format!("{linux}.tar.gz"))),
+        );
+        refuses(
+            "a stray file in a release folder",
+            "is not an archive",
+            |releases| fs::write(releases.join(tag).join("notes.txt"), b"x").unwrap(),
+        );
+        refuses(
+            "a folder not named by its descriptors' tag",
+            "belongs in a folder named",
+            |releases| fs::rename(releases.join(tag), releases.join("php-8.5.13-ck1")).unwrap(),
+        );
+        refuses(
+            "a SHA256SUMS that omits an archive",
+            "does not list",
+            |releases| {
+                let macos = "php-8.5.12-ck1-macos-aarch64.tar.gz";
+                let kept = format!("{}  {macos}\n", Sha256Digest::of(MACOS_8_5));
+                fs::write(releases.join(tag).join("SHA256SUMS"), kept).unwrap();
+            },
+        );
+        refuses(
+            "a SHA256SUMS that disagrees with the descriptors",
+            "but SHA256SUMS says",
+            |releases| {
+                let sums = releases.join(tag).join("SHA256SUMS");
+                let text = fs::read_to_string(&sums).unwrap();
+                let right = Sha256Digest::of(LINUX_8_5).to_string();
+                let wrong = Sha256Digest::of(b"another archive").to_string();
+                fs::write(&sums, text.replace(&right, &wrong)).unwrap();
+            },
+        );
+        refuses(
+            "an archive without its descriptor",
+            "has no descriptor",
+            |releases| fs::remove_file(releases.join(tag).join(format!("{linux}.json"))).unwrap(),
+        );
+    }
+
+    /// Builds from [`good_releases`] after `change`, and expects a refusal
+    /// whose message holds `reason`.
+    fn refuses(case: &str, reason: &str, change: impl Fn(&Path)) {
+        let temp = TempDir::new();
+        let releases = good_releases(&temp.0);
+        change(&releases);
+        let result = build(&releases, &spec(PREFIX), &release());
+        assert!(
+            matches!(&result, Err(Error::Invalid(message)) if message.contains(reason)),
+            "{case}: {result:?}"
+        );
     }
 }

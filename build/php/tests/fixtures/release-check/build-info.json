@@ -1,0 +1,9 @@
+{
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "run_id": 44490557365,
+  "run_attempt": 1,
+  "workflow": ".github/workflows/php-build.yml",
+  "event": "workflow_dispatch",
+  "ref": "refs/heads/main",
+  "clean": true
+}

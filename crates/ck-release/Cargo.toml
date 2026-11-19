@@ -6,14 +6,24 @@ rust-version.workspace = true
 publish.workspace = true
 
 # The release tool for the PHP build pipeline. It runs in CI and in this
-# repository only, and is never shipped: packaging bundles `ck` only.
+# repository only, and is never shipped: packaging bundles `ck` only. It is
+# the only crate that holds a signing key outside test code (`sign`).
 [[bin]]
 name = "ck-release"
 path = "src/main.rs"
 
 [dependencies]
+# base64 and ed25519-dalek read the signing key and write the envelope. No
+# extra ed25519-dalek feature: its `pkcs8`, `pem` and `zeroize` features stay
+# off, so the key PEM is parsed here and our own buffers are wiped with
+# `zeroize`.
+base64.workspace = true
 ck-core.workspace = true
+# `sign` and `key check` check a key file's owner with
+# `ck_sys::unix::effective_uid` (Unix only).
+ck-sys.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
 # flate2, sha2 and tar are for the packer (`pack`).
 flate2.workspace = true
 serde.workspace = true
@@ -24,6 +34,11 @@ thiserror.workspace = true
 # `parsing` reads `payload build --expires` (RFC 3339). It adds no crate.
 time = { workspace = true, features = ["parsing"] }
 url.workspace = true
+zeroize.workspace = true
+
+# Throwaway test keys only (`ck-core/tests/support/signing.rs`).
+[dev-dependencies]
+getrandom.workspace = true
 
 [lints]
 workspace = true
