@@ -345,8 +345,8 @@ ck_audit_elf_hardening() {
         # Flg, then Align: drop the alignment; the flags may hold a space.
         flags=${rest% *}
         case "$flags" in
-          *E*) stack=exec ;;
-          *) stack=noexec ;;
+          *E*) stack='exec' ;;
+          *) stack='noexec' ;;
         esac
         ;;
     esac
