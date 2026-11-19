@@ -5,6 +5,7 @@ members = [
   "crates/ck-core",
   "crates/ck-cli",
   "crates/ck-net",
+  "crates/ck-release",
   "apps/desktop/src-tauri",
 ]
 
@@ -17,6 +18,7 @@ publish = false
 [workspace.dependencies]
 base64 = "0.23.1"
 ck-core = { path = "crates/ck-core" }
+ck-release = { path = "crates/ck-release" }
 ck-sys = { path = "crates/ck-sys" }
 clap = { version = "4.6", features = ["derive"] }
 dirs = "7.0.0"

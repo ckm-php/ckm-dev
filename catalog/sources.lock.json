@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "name": "cacert",
+      "version": "2026-11-05",
+      "url": "https://curl.se/ca/cacert-2026-11-05.pem",
+      "sha256": "427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285",
+      "size": 200116,
+      "license": "MPL-2.0",
+      "signature": "sha256-file"
+    },
+    {
+      "name": "curl",
+      "version": "8.17.0",
+      "url": "https://github.com/curl/curl/releases/download/curl-8_17_0/curl-8.17.0.tar.xz",
+      "sha256": "955f6e729ad6b3566260e8fef68620e76ba3c31acf0a18524416a185acf77992",
+      "size": 2797000,
+      "license": "curl",
+      "signature": "gpg"
+    },
+    {
+      "name": "curl",
+      "version": "8.23.0",
+      "url": "https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz",
+      "sha256": "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5",
+      "size": 2990916,
+      "license": "curl",
+      "signature": "gpg"
+    },
+    {
+      "name": "icu",
+      "version": "74.2",
+      "url": "https://github.com/unicode-org/icu/releases/download/release-74-2/icu4c-74_2-src.tgz",
+      "sha256": "68db082212a96d6f53e35d60f47d38b962e9f9d207a74cfac78029ae8ff5e08c",
+      "size": 26529443,
+      "license": "Unicode-3.0",
+      "signature": "gpg"
+    },
+    {
+      "name": "icu",
+      "version": "79.1",
+      "url": "https://github.com/unicode-org/icu/releases/download/release-79.1/icu4c-79.1-sources.tgz",
+      "sha256": "06fa63ecb521048f8082f12ad988f6b678d90cbd88aafce24cbc94902b191d99",
+      "size": 28162455,
+      "license": "Unicode-3.0",
+      "signature": "gpg"
+    },
+    {
+      "name": "libsodium",
+      "version": "1.0.22",
+      "url": "https://github.com/jedisct1/libsodium/releases/download/1.0.22-RELEASE/libsodium-1.0.22.tar.gz",
+      "sha256": "adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349",
+      "size": 2008529,
+      "license": "ISC",
+      "signature": "none"
+    },
+    {
+      "name": "libxml2",
+      "version": "2.11.9",
+      "url": "https://download.gnome.org/sources/libxml2/2.11/libxml2-2.11.9.tar.xz",
+      "sha256": "780157a1efdb57188ec474dca87acaee67a3a839c2525b2214d318228451809f",
+      "size": 2627500,
+      "license": "MIT",
+      "signature": "sha256-file"
+    },
+    {
+      "name": "libxml2",
+      "version": "2.15.4",
+      "url": "https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz",
+      "sha256": "98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821",
+      "size": 3177444,
+      "license": "MIT",
+      "signature": "sha256-file"
+    },
+    {
+      "name": "oniguruma",
+      "version": "6.9.10",
+      "url": "https://github.com/kkos/oniguruma/releases/download/v6.9.10/onig-6.9.10.tar.gz",
+      "sha256": "2a5cfc5ae259e4e97f86b68dfffc152cdaffe94e2060b770cb827238d769fc05",
+      "size": 979159,
+      "license": "BSD-2-Clause",
+      "signature": "sha256-file"
+    },
+    {
+      "name": "openssl",
+      "version": "1.1.1w",
+      "url": "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz",
+      "sha256": "cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8",
+      "size": 9893384,
+      "license": "OpenSSL",
+      "signature": "gpg"
+    },
+    {
+      "name": "openssl",
+      "version": "3.5.9",
+      "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz",
+      "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+      "size": 53279637,
+      "license": "Apache-2.0",
+      "signature": "gpg"
+    },
+    {
+      "name": "patchelf",
+      "version": "0.19.3",
+      "url": "https://github.com/NixOS/patchelf/releases/download/0.19.3/patchelf-0.19.3.tar.gz",
+      "sha256": "fac76a3c0b730e8d53ea1d10cd6015322d78c9900af91736f2cca51d5837b612",
+      "size": 492713,
+      "license": "GPL-3.0-or-later",
+      "signature": "none"
+    },
+    {
+      "name": "php",
+      "version": "7.4.33",
+      "url": "https://www.php.net/distributions/php-7.4.33.tar.xz",
+      "sha256": "924846abf93bc613815c55dd3f5809377813ac62a9ec4eb3778675b82a27b927",
+      "size": 10420144,
+      "license": "PHP-3.01",
+      "signature": "gpg"
+    },
+    {
+      "name": "php",
+      "version": "8.5.12",
+      "url": "https://www.php.net/distributions/php-8.5.12.tar.xz",
+      "sha256": "08bc2eba2a588654ade1357174aa646b761556c862dda0678345ee29ed481209",
+      "size": 14554312,
+      "license": "PHP-3.01",
+      "signature": "gpg"
+    },
+    {
+      "name": "pkgconf",
+      "version": "3.0.11",
+      "url": "https://github.com/pkgconf/pkgconf/releases/download/pkgconf-3.0.11/pkgconf-3.0.11.tar.xz",
+      "sha256": "d0cd841bc8e55b9da888106c00dc256d05b7d1d8e5a46f4be4eb4c5125bd2dc4",
+      "size": 429908,
+      "license": "ISC",
+      "signature": "none"
+    },
+    {
+      "name": "sqlite",
+      "version": "3.54.1",
+      "url": "https://www.sqlite.org/2026/sqlite-autoconf-3540100.tar.gz",
+      "sha256": "926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e",
+      "size": 3332984,
+      "license": "blessing",
+      "signature": "none"
+    },
+    {
+      "name": "zlib",
+      "version": "1.4",
+      "url": "https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.gz",
+      "sha256": "02dd159783677a749c04adbdd02b55b8a2bcc7e054f51b76b549199a916ad584",
+      "size": 1507140,
+      "license": "Zlib",
+      "signature": "none"
+    }
+  ]
+}

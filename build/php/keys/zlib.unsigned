@@ -1,0 +1,8 @@
+# zlib's signatures are not checked: see README.md in this folder.
+#
+# zlib releases are signed by Mark Adler (5ED4 6A67 21D3 6558 7791 E2AA
+# 783F CD8E 58BC AFBA, the issuer of zlib-1.4.tar.gz.asc). zlib.net links
+# his key at https://madler.net/madler/pgp.html, not an approved host, and
+# it is not on github.com (https://github.com/madler.gpg is empty). Replace this
+# file with zlib.gpg and zlib.fingerprints once the owner approves a source.
+No zlib signing key is published on an approved host.

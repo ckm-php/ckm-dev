@@ -1,0 +1,10 @@
+# Fingerprint allow-list for curl: see README.md in this folder.
+#
+# Keyring: mykey.asc from Daniel Stenberg's own repository
+# https://github.com/bagder/daniel.haxx.se (commit
+# fc396d15ec73e9f7b75f62c60349d36e8f3ca8f3); https://curl.se/download.html
+# links its "PGP Key" to https://daniel.haxx.se/address.html, which links
+# /mykey.asc. Cross-checked on 2026-11-19 against docs/VERIFY.md in
+# https://github.com/curl/curl and against that address.html page.
+
+27ED EAF2 2F3A BCEB 50DB  9A12 5CC9 08FD B71E 12C2  # Daniel Stenberg <daniel@haxx.se>

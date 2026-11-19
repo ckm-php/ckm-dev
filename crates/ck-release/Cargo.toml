@@ -1,0 +1,29 @@
+[package]
+name = "ck-release"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The release tool for the PHP build pipeline. It runs in CI and in this
+# repository only, and is never shipped: packaging bundles `ck` only.
+[[bin]]
+name = "ck-release"
+path = "src/main.rs"
+
+[dependencies]
+ck-core.workspace = true
+clap.workspace = true
+# flate2, sha2 and tar are for the packer (`pack`).
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+# `parsing` reads `payload build --expires` (RFC 3339). It adds no crate.
+time = { workspace = true, features = ["parsing"] }
+url.workspace = true
+
+[lints]
+workspace = true
