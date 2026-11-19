@@ -130,6 +130,80 @@ pub enum Error {
     #[error("process {pid} is not the recorded process: {reason}")]
     IdentityMismatch { pid: u32, reason: String },
 
+    /// A catalog that breaks an envelope or schema rule: its size, format,
+    /// an unknown field or a field's value.
+    #[error("the catalog is not valid: {reason}")]
+    CatalogInvalid { reason: String },
+
+    /// A catalog that no trusted key signed, including when no key is trusted.
+    #[error("the catalog's signature is not trusted: {reason}")]
+    CatalogUntrusted { reason: String },
+
+    /// The catalog's `expires` time, in Unix seconds, has passed.
+    #[error("the catalog expired at {expires} (Unix time); refresh it before installing")]
+    CatalogExpired { expires: u64 },
+
+    /// A catalog older than the newest one accepted, or than the app's floor.
+    #[error("catalog sequence {offered} is older than {current}, the newest this app accepts")]
+    CatalogOutdated { offered: u64, current: u64 },
+
+    /// The accepted catalog's sequence, with different contents.
+    #[error("catalog sequence {sequence} was already accepted with different contents")]
+    CatalogConflict { sequence: u64 },
+
+    /// The catalog has no artifact for this runtime version on this computer.
+    #[error("the catalog has no {name} {version} for {platform}")]
+    NotInCatalog {
+        name: String,
+        version: String,
+        platform: String,
+    },
+
+    /// A URL that the transport policy refuses. `url` holds the scheme, host
+    /// and path only, because redirect URLs carry signed tokens.
+    #[error("{url} is not allowed: {reason}")]
+    UrlRefused { url: String, reason: String },
+
+    /// A request that failed, timed out or answered other than 200. `url` as
+    /// in [`Error::UrlRefused`].
+    #[error("the download of {url} failed: {reason}")]
+    DownloadFailed { url: String, reason: String },
+
+    /// A download that is not the pinned size: another `Content-Length`, a
+    /// body cut short, or more bytes than pinned.
+    #[error("{url} is not the {expected} bytes the catalog pins: {detail}")]
+    SizeMismatch {
+        url: String,
+        expected: u64,
+        detail: String,
+    },
+
+    /// A download whose SHA-256 is not the pinned one.
+    #[error("{url} has SHA-256 {actual}, but the catalog pins {expected}")]
+    ChecksumMismatch {
+        url: String,
+        expected: String,
+        actual: String,
+    },
+
+    /// An archive that cannot be read, or that breaks a whole-archive rule
+    /// such as the entry or size cap.
+    #[error("the archive is refused: {reason}")]
+    ArchiveRefused { reason: String },
+
+    /// An archive entry that breaks a name, type or link rule, which refuses
+    /// the whole archive. The name prints escaped: it comes from the archive.
+    #[error("the archive is refused: entry {entry:?} {reason}")]
+    ArchiveEntryRefused { entry: String, reason: String },
+
+    /// Another install or uninstall of this runtime version holds its lock.
+    #[error("{name} {version} is busy with another install or uninstall; try again")]
+    RuntimeBusy { name: String, version: String },
+
+    /// No folder exists for this runtime version.
+    #[error("{name} {version} is not installed")]
+    NotInstalled { name: String, version: String },
+
     /// Any other failure, with its context in the message.
     #[error("{0}")]
     Internal(String),
@@ -176,6 +250,20 @@ impl Error {
             | Self::InvalidServiceId(_)
             | Self::InvalidSpec { .. }
             | Self::IdentityMismatch { .. }
+            | Self::CatalogInvalid { .. }
+            | Self::CatalogUntrusted { .. }
+            | Self::CatalogExpired { .. }
+            | Self::CatalogOutdated { .. }
+            | Self::CatalogConflict { .. }
+            | Self::NotInCatalog { .. }
+            | Self::UrlRefused { .. }
+            | Self::DownloadFailed { .. }
+            | Self::SizeMismatch { .. }
+            | Self::ChecksumMismatch { .. }
+            | Self::ArchiveRefused { .. }
+            | Self::ArchiveEntryRefused { .. }
+            | Self::RuntimeBusy { .. }
+            | Self::NotInstalled { .. }
             | Self::Internal(_) => ErrorCode::Internal,
         }
     }

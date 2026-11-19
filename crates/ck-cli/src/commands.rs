@@ -8,40 +8,111 @@
 //!   then a table with the columns `SERVICE STATE PID PORT SINCE`. `status`
 //!   with no supervisor is not an error.
 
-use ck_core::Result;
+use ck_core::ipc::endpoint::Endpoint;
+use ck_core::ipc::protocol::ServiceStatus;
+use ck_core::paths::BuildKind;
+use ck_core::{ErrorCode, Paths, Result, client, supervisor};
+
+use crate::output::{self, PathsBody, ServiceBody, StatusBody, SupervisorBody, SupervisorStopBody};
 
 /// `ck status [--json]`
-pub fn status(json: bool) -> Result<()> {
-    let _ = json;
-    todo!()
+pub async fn status(paths: &Paths, json: bool) -> Result<()> {
+    let body = match client::connect(paths).await {
+        Ok(mut client) => {
+            let hello = client.hello();
+            let supervisor = SupervisorBody {
+                pid: hello.pid,
+                version: hello.version.clone(),
+            };
+            let reply = client.status().await?;
+            StatusBody {
+                supervisor: Some(supervisor),
+                services: reply.services,
+            }
+        }
+        Err(error) if error.code() == ErrorCode::SupervisorUnavailable => StatusBody {
+            supervisor: None,
+            services: Vec::new(),
+        },
+        Err(error) => return Err(error),
+    };
+
+    if json {
+        return output::print_ok(body);
+    }
+    let headline = match &body.supervisor {
+        Some(supervisor) => format!("Supervisor: running (pid {})", supervisor.pid),
+        None => "Supervisor: not running".to_owned(),
+    };
+    output::print_line(&headline)?;
+    output::print_line(&output::status_table(&body.services))
 }
 
 /// `ck start <service> [--json]`
-pub fn start(service: &str, json: bool) -> Result<()> {
-    let _ = (service, json);
-    todo!()
+pub async fn start(paths: &Paths, service: &str, json: bool) -> Result<()> {
+    let mut client = client::ensure(paths).await?;
+    let status = client.start(service).await?;
+    print_service(status, json)
 }
 
 /// `ck stop <service> [--json]`
-pub fn stop(service: &str, json: bool) -> Result<()> {
-    let _ = (service, json);
-    todo!()
+pub async fn stop(paths: &Paths, service: &str, json: bool) -> Result<()> {
+    let mut client = client::ensure(paths).await?;
+    let status = client.stop(service).await?;
+    print_service(status, json)
+}
+
+/// The result of `start` or `stop`: the service's state after it.
+fn print_service(service: ServiceStatus, json: bool) -> Result<()> {
+    if json {
+        output::print_ok(ServiceBody { service })
+    } else {
+        output::print_line(&output::service_line(&service))
+    }
 }
 
 /// `ck supervisor stop [--json]`. Not an error when none is running.
-pub fn supervisor_stop(json: bool) -> Result<()> {
-    let _ = json;
-    todo!()
+pub async fn supervisor_stop(paths: &Paths, json: bool) -> Result<()> {
+    let was_running = client::shutdown(paths).await?;
+    if json {
+        return output::print_ok(SupervisorStopBody { was_running });
+    }
+    output::print_line(if was_running {
+        "Supervisor: stopped"
+    } else {
+        "Supervisor: not running"
+    })
 }
 
 /// `ck supervisor run [--detached]`, hidden: `ck_core::supervisor::run`.
-pub fn supervisor_run(detached: bool) -> Result<()> {
-    let _ = detached;
-    todo!()
+pub async fn supervisor_run(paths: Paths, detached: bool) -> Result<()> {
+    supervisor::run(paths, detached).await
 }
 
 /// `ck paths [--json]`. Creates nothing, so it is safe with a release binary.
-pub fn paths(json: bool) -> Result<()> {
-    let _ = json;
-    todo!()
+pub fn paths(paths: Paths, json: bool) -> Result<()> {
+    let endpoint = Endpoint::locate(&paths.data)?.map(|endpoint| endpoint.to_string());
+    let body = PathsBody {
+        build: BuildKind::current(),
+        profile: paths.profile,
+        home: paths.home,
+        data: paths.data,
+        endpoint,
+    };
+
+    if json {
+        return output::print_ok(body);
+    }
+    let endpoint = body
+        .endpoint
+        .as_deref()
+        .unwrap_or("none (the data folder does not exist yet)");
+    let lines = [
+        format!("Build:    {}", output::build_name(body.build)),
+        format!("Profile:  {}", output::profile_name(body.profile)),
+        format!("Home:     {}", body.home.display()),
+        format!("Data:     {}", body.data.display()),
+        format!("Endpoint: {endpoint}"),
+    ];
+    output::print_line(&lines.join("\n"))
 }

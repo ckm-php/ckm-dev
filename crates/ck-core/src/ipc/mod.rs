@@ -17,7 +17,8 @@ pub const MAX_REQUEST_BYTES: u32 = 64 * 1024;
 /// Largest response body a client accepts.
 pub const MAX_RESPONSE_BYTES: u32 = 1024 * 1024;
 
-/// Connections the supervisor serves at once; it waits to accept more.
+/// Connections the supervisor serves at once; connections over the limit are
+/// dropped.
 pub const MAX_CONNECTIONS: usize = 32;
 
 /// How long a new connection may take to send its first frame.

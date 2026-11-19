@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use ck_core::branding;
+use ck_core::{Error, Paths, Result, branding};
 use clap::{Args, Parser, Subcommand};
 
 mod commands;
@@ -92,15 +92,26 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(command: Command) -> ck_core::Result<()> {
+/// Runs `command` on a current-thread runtime, which the supervisor and the
+/// client both expect.
+fn run(command: Command) -> Result<()> {
+    let paths = Paths::current()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::os("start the async runtime", e))?;
+    runtime.block_on(dispatch(command, paths))
+}
+
+async fn dispatch(command: Command, paths: Paths) -> Result<()> {
     match command {
-        Command::Status(flag) => commands::status(flag.json),
-        Command::Start { service, flag } => commands::start(&service, flag.json),
-        Command::Stop { service, flag } => commands::stop(&service, flag.json),
+        Command::Status(flag) => commands::status(&paths, flag.json).await,
+        Command::Start { service, flag } => commands::start(&paths, &service, flag.json).await,
+        Command::Stop { service, flag } => commands::stop(&paths, &service, flag.json).await,
         Command::Supervisor { command } => match command {
-            SupervisorCommand::Stop(flag) => commands::supervisor_stop(flag.json),
-            SupervisorCommand::Run { detached } => commands::supervisor_run(detached),
+            SupervisorCommand::Stop(flag) => commands::supervisor_stop(&paths, flag.json).await,
+            SupervisorCommand::Run { detached } => commands::supervisor_run(paths, detached).await,
         },
-        Command::Paths(flag) => commands::paths(flag.json),
+        Command::Paths(flag) => commands::paths(paths, flag.json),
     }
 }

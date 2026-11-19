@@ -727,7 +727,10 @@ mod tests {
         };
         std::fs::create_dir_all(paths.records_dir()).unwrap();
 
-        let mut child = OwnChild(Command::new("sleep").arg("30").spawn().unwrap());
+        let mut child = {
+            let _spawns = crate::test_support::spawn_guard();
+            OwnChild(Command::new("sleep").arg("30").spawn().unwrap())
+        };
         let pid = Pid::new(child.0.id()).unwrap();
         let real = identity::read(pid).unwrap().expect("the child runs");
         identity::verify(pid, &real).unwrap();
