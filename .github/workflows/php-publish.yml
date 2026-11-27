@@ -7,8 +7,8 @@
 # environment, and only when that environment holds RELEASE_GATE=armed. It
 # attests the archives, creates each release as a draft at
 # this workflow's commit, uploads and re-downloads the files, and only then
-# publishes the drafts, which creates the tags last. A failure before that
-# deletes the drafts it made; a published release is never touched.
+# publishes the drafts, which creates the tags last. After a failure it
+# reports any leftover drafts, without deleting releases.
 #
 #   gh workflow run "PHP publish" -R <owner>/<repo> -f run_id=<id> -f commit=<40 hex>
 name: PHP publish
@@ -267,25 +267,10 @@ jobs:
             (cd "$set_dir/$tag" && sha256sum --check --strict SHA256SUMS)
           done
 
-      # Cleanup runs only after this step passed, so it never deletes a
-      # draft this run did not create.
       - name: No release or tag exists yet (drafts included)
-        id: fresh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')
-          for tag in $TAGS; do
-            if grep -qxF -- "$tag" <<<"$releases"; then
-              echo "::error::a release or draft named $tag already exists; delete a leftover draft by hand"
-              exit 1
-            fi
-            refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq '.[].ref')
-            if grep -qxF -- "refs/tags/$tag" <<<"$refs"; then
-              echo "::error::a tag $tag already exists"
-              exit 1
-            fi
-          done
+        run: bash build/php/release-drafts.sh preflight
 
       # An attestation for each archive, signed in Sigstore's public log by
       # this workflow (php-publish.yml) for these exact files.
@@ -295,44 +280,18 @@ jobs:
         with:
           subject-path: ${{ runner.temp }}/release-set/*/*.tar.gz
 
-      # Phase 1: drafts. A draft has no tag yet, so deleting one after a
-      # failure leaves nothing behind.
+      # Phase 1: create drafts and use the IDs the API returns.
       - name: Create the drafts
+        id: drafts
         env:
           GH_TOKEN: ${{ github.token }}
           ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
-        run: |
-          for tag in $TAGS; do
-            version=${tag#php-}
-            notes=$RUNNER_TEMP/notes-$tag.md
-            {
-              echo "PHP $version for Linux x86_64 and macOS on Apple Silicon, built by CK Dev's CI."
-              echo
-              echo "- Build run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
-              echo "- Commit: $COMMIT"
-              echo "- Attestation, signed by the publish workflow (php-publish.yml) for these exact files: $ATTESTATION_URL"
-              echo
-              echo "Check an archive with \`gh attestation verify <file> --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/php-publish.yml\` and against \`SHA256SUMS\`."
-            } >"$notes"
-            gh release create "$tag" --draft --target "$GITHUB_SHA" --latest=false \
-              --title "PHP $version" --notes-file "$notes"
-            ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq ".[] | select(.draft and .tag_name == \"$tag\") | .id")
-            if ! [[ $ids =~ ^[0-9]+$ ]]; then
-              echo "::error::expected exactly one draft for $tag, found: $ids"
-              exit 1
-            fi
-            echo "draft $ids for $tag"
-          done
+        run: bash build/php/release-drafts.sh create
 
       - name: Upload the assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          for tag in $TAGS; do
-            files=("$RUNNER_TEMP/release-set/$tag"/*)
-            gh release upload "$tag" "${files[@]}"
-          done
+        run: bash build/php/release-drafts.sh upload
 
       # What was uploaded must be byte for byte what was checked: the same
       # file names, and the same bytes for every file (descriptors and
@@ -340,39 +299,16 @@ jobs:
       - name: Check the uploaded assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          for tag in $TAGS; do
-            uploaded=$RUNNER_TEMP/uploaded/$tag
-            mkdir -p "$uploaded"
-            gh release download "$tag" --dir "$uploaded"
-            diff -r "$RUNNER_TEMP/release-set/$tag" "$uploaded"
-            (cd "$uploaded" && sha256sum --check --strict SHA256SUMS)
-          done
+        run: bash build/php/release-drafts.sh verify-assets
 
-      # Phase 2: publish each draft, which creates its tag at this commit.
-      # Nothing else runs between two publishes, so a failed read cannot
-      # leave one checked version unpublished.
+      # Phase 2: publish each checked draft with its tag and target commit.
       - name: Publish the drafts
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          : >"$RUNNER_TEMP/published"
-          for tag in $TAGS; do
-            gh release edit "$tag" --draft=false --latest=false
-            echo "$tag" >>"$RUNNER_TEMP/published"
-          done
+        run: bash build/php/release-drafts.sh publish
 
-      - name: Check the tags
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Summarize published releases
         run: |
-          for tag in $TAGS; do
-            sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)
-            if [ "$sha" != "$GITHUB_SHA" ]; then
-              echo "::error::the tag $tag points at $sha, not $GITHUB_SHA"
-              exit 1
-            fi
-          done
           {
             echo "## Published"
             echo
@@ -381,47 +317,16 @@ jobs:
             done
           } >>"$GITHUB_STEP_SUMMARY"
 
-      # Deletes only releases that are still drafts, by id, after reading
-      # each one again. A published release keeps its tag: deleting it would
-      # burn the tag under immutable releases.
-      - name: Delete the drafts after a failure
-        if: ${{ (failure() || cancelled()) && steps.fresh.outcome == 'success' }}
+      # GitHub has no draft-only DELETE precondition. Never delete from CI.
+      - name: Report leftover releases after a failure
+        if: ${{ (failure() || cancelled()) && steps.drafts.outcome != 'skipped' && steps.drafts.outcome != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          status=0
-          for tag in $TAGS; do
-            if ! [[ $tag =~ ^php-[0-9]+\.[0-9]+\.[0-9]+-ck[1-9][0-9]*$ ]]; then
-              continue
-            fi
-            if ! ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq ".[] | select(.draft and .tag_name == \"$tag\") | .id"); then
-              echo "::error::could not list the drafts for $tag; check the releases by hand"
-              status=1
-              continue
-            fi
-            for id in $ids; do
-              draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$id" --jq .draft) || draft=unknown
-              if [ "$draft" != true ]; then
-                echo "::warning::release $id ($tag) is no longer a draft; left alone"
-                continue
-              fi
-              if gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"; then
-                echo "deleted draft $id ($tag)"
-              else
-                echo "::error::could not delete draft release $id ($tag); delete it by hand"
-                status=1
-              fi
-            done
-          done
-          published=
-          if [ -s "$RUNNER_TEMP/published" ]; then
-            published=$(tr '\n' ' ' <"$RUNNER_TEMP/published")
-          fi
           {
             echo "## Publishing failed"
             echo
-            echo "- Already published (tags exist, kept): ${published:-none}"
-            echo "- Drafts of the others were deleted, unless an error above says otherwise."
-          } >>"$GITHUB_STEP_SUMMARY"
-          exit "$status"
+            echo "Check GitHub Releases before retrying. Never delete a published release."
+            echo
+            bash build/php/release-drafts.sh report 2>&1
+          } | tee -a "$GITHUB_STEP_SUMMARY"

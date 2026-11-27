@@ -184,4 +184,140 @@ cp -R "$T_ROOT/set" "$T_ROOT/set-stray"
 printf 'x\n' >"$T_ROOT/set-stray/php-8.5.12-ck1/.hidden"
 t_set "--check refuses a stray file" "holds 6 entries, expected 5" --check "$T_ROOT/set-stray"
 
+# A draft's REST tag can differ from the tag that will be created on publish.
+# The fake API rejects requests that use anything other than the recorded ID.
+gh() {
+  [ "$1" = api ] || return 1
+  shift
+  printf '%s\n' "$*" >>"$T_ROOT/api-calls"
+  local repo=repos/ckm-php/ckm-dev endpoint=$1 name id file hash
+  shift
+  case "$endpoint" in
+    "$repo/releases")
+      [ "$*" = "--method POST -F draft=true -f make_latest=false -f tag_name=$T_TAG -f target_commitish=$T_SHA -f name=PHP 8.5.12-ck1 -F body=@$RUNNER_TEMP/notes-$T_TAG.md" ] ||
+        return 1
+      jq -n --arg target "$T_SHA" --rawfile body "$RUNNER_TEMP/notes-$T_TAG.md" \
+        '{id: 42, tag_name: "untagged-d4b97137932eb183d68d", draft: true, target_commitish: $target, body: $body}' |
+        tee "$T_ROOT/draft.json"
+      ;;
+    "$repo/releases?per_page=100")
+      [ "$1" = --paginate ] && [ "$2" = --jq ] || return 1
+      jq -r "$3" "$T_ROOT/releases.json"
+      ;;
+    "$repo/git/matching-refs/tags/$T_TAG") cat "$T_ROOT/refs.json" ;;
+    "$repo/git/ref/tags/$T_TAG") cat "$T_ROOT/published-ref.json" ;;
+    "$repo/releases/42")
+      case "${1:-}" in
+        --method)
+          case "$2" in
+            PATCH)
+              [ "$*" = "--method PATCH -F draft=false -f make_latest=false -f tag_name=$T_TAG -f target_commitish=$T_SHA" ] ||
+                return 1
+              jq --arg tag "$T_TAG" '.draft = false | .tag_name = $tag' "$T_ROOT/draft.json"
+              ;;
+            *) return 1 ;;
+          esac
+          ;;
+        '') jq --slurpfile assets "$T_ROOT/assets.jsonl" '.assets = $assets' "$T_ROOT/draft.json" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    "https://uploads.github.com/$repo/releases/42/assets?name="*)
+      name=${endpoint##*=}
+      file="$RUNNER_TEMP/release-set/$T_TAG/$name"
+      [ "$*" = "--method POST -H Content-Type: application/octet-stream --input $file" ] ||
+        return 1
+      id=$(($(wc -l <"$T_ROOT/assets.jsonl") + 100))
+      cp "$file" "$T_ROOT/asset-$id"
+      hash=$(sha256sum <"$file" 2>/dev/null || shasum -a 256 <"$file")
+      jq -nc --arg name "$name" --argjson id "$id" --arg digest "sha256:${hash%% *}" \
+        '{id: $id, name: $name, state: "uploaded", digest: $digest}' >>"$T_ROOT/assets.jsonl"
+      ;;
+    "$repo/releases/assets/"*)
+      [ "$*" = "-H Accept: application/octet-stream" ] || return 1
+      cat "$T_ROOT/asset-${endpoint##*/}"
+      ;;
+    *) return 1 ;;
+  esac
+}
+export -f gh
+export T_ROOT T_SHA T_TAG=php-8.5.12-ck1
+export RUNNER_TEMP="$T_ROOT/runner"
+export GITHUB_REPOSITORY=ckm-php/ckm-dev GITHUB_REF=refs/heads/main GITHUB_SHA="$T_SHA"
+export GITHUB_SERVER_URL=https://github.com GITHUB_RUN_ID=46028817425 GITHUB_RUN_ATTEMPT=1
+export TAGS="$T_TAG" RUN_ID="$T_RUN" COMMIT="$T_SHA" ATTESTATION_URL=https://github.com/example
+mkdir "$RUNNER_TEMP"
+mkdir "$RUNNER_TEMP/release-set"
+cp -R "$T_ROOT/set/$T_TAG" "$RUNNER_TEMP/release-set/"
+: >"$T_ROOT/assets.jsonl"
+printf '[]\n' >"$T_ROOT/releases.json"
+printf '[]\n' >"$T_ROOT/refs.json"
+jq -n --arg sha "$T_SHA" '{object: {sha: $sha}}' >"$T_ROOT/published-ref.json"
+
+t_draft() {
+  bash "$PHP_DIR/release-drafts.sh" "$@" >"$T_ROOT/stdout" 2>"$T_ROOT/stderr"
+}
+
+t_draft preflight || t_fail "no existing tag or release"
+printf '%s\n' '[{"tag_name":"untagged-d4b97137932eb183d68d","draft":true,"name":"PHP 8.5.12-ck1"}]' \
+  >"$T_ROOT/releases.json"
+if t_draft preflight; then t_fail "a leftover untagged draft was missed"; fi
+grep -q "a release or draft for $T_TAG already exists" "$T_ROOT/stderr" ||
+  t_fail "wrong reason for refusing a leftover draft"
+t_ok "preflight catches a leftover draft with a temporary tag"
+printf '[]\n' >"$T_ROOT/releases.json"
+
+t_draft create || t_fail "create an untagged draft by ID"
+grep -qx 42 "$RUNNER_TEMP/release-ids/$T_TAG" || t_fail "no recorded draft ID"
+t_draft upload || t_fail "upload to the untagged draft by ID"
+t_draft verify-assets || t_fail "download from the untagged draft and verify by ID"
+t_draft publish || t_fail "publish the untagged draft by ID"
+grep -q "releases/42 --method PATCH" "$T_ROOT/api-calls" || t_fail "no publish by ID"
+grep -q "git/ref/tags/$T_TAG" "$T_ROOT/api-calls" || t_fail "no published tag check"
+t_ok "an untagged draft publishes by ID with its checked tag and commit"
+
+mv "$RUNNER_TEMP/uploaded" "$T_ROOT/verified-upload"
+printf 'wrong bytes\n' >>"$T_ROOT/asset-101"
+if t_draft verify-assets; then t_fail "an altered remote asset was accepted"; fi
+t_ok "assets are uploaded and read by ID, and altered bytes are refused"
+
+: >"$T_ROOT/api-calls"
+cp "$T_ROOT/assets.jsonl" "$T_ROOT/verified-assets.jsonl"
+jq -c 'if .id == 101 then .id = 999 else . end' "$T_ROOT/verified-assets.jsonl" >"$T_ROOT/assets.jsonl"
+if t_draft publish; then t_fail "a draft with a replaced asset was accepted"; fi
+grep -q "assets changed since verification" "$T_ROOT/stderr" || t_fail "wrong reason for refusing replaced asset"
+if grep -q -- '--method PATCH' "$T_ROOT/api-calls"; then t_fail "publish tried to use a replaced asset"; fi
+cp "$T_ROOT/verified-assets.jsonl" "$T_ROOT/assets.jsonl"
+t_ok "publish refuses a draft whose asset was replaced after verification"
+
+: >"$T_ROOT/api-calls"
+jq -n --arg ref "refs/tags/$T_TAG" '[{ref: $ref}]' >"$T_ROOT/refs.json"
+if t_draft publish; then t_fail "an existing tag was not refused"; fi
+if grep -q -- '--method PATCH' "$T_ROOT/api-calls"; then t_fail "attempted to reuse a tag"; fi
+t_ok "a tag created after preparation is refused"
+printf '[]\n' >"$T_ROOT/refs.json"
+
+jq -n '{object: {sha: "fedcba9876543210fedcba9876543210fedcba98"}}' >"$T_ROOT/published-ref.json"
+if t_draft publish; then t_fail "a published tag at the wrong commit was accepted"; fi
+grep -q "published tag $T_TAG points at" "$T_ROOT/stderr" || t_fail "missing wrong-tag diagnostic"
+t_ok "publishing stops if the newly published tag resolves to the wrong commit"
+
+cp "$T_ROOT/draft.json" "$T_ROOT/created.json"
+: >"$T_ROOT/api-calls"
+jq '.body = "from another run"' "$T_ROOT/created.json" >"$T_ROOT/draft.json"
+if t_draft publish; then t_fail "another run's draft was not refused"; fi
+if t_draft report; then t_fail "report must flag an unrecognized draft"; fi
+if grep -Eq -- '--method (PATCH|DELETE)' "$T_ROOT/api-calls"; then t_fail "touched an unrecognized draft"; fi
+t_ok "an unrecognized draft is neither published nor deleted"
+
+: >"$T_ROOT/api-calls"
+jq '.draft = false' "$T_ROOT/created.json" >"$T_ROOT/draft.json"
+t_draft report || t_fail "could not report a published release"
+grep -q "Keeping published release 42" "$T_ROOT/stdout" || t_fail "did not identify the published release"
+cp "$T_ROOT/created.json" "$T_ROOT/draft.json"
+t_draft report || t_fail "could not report a leftover draft"
+grep -q "Draft 42 for $T_TAG remains" "$T_ROOT/stdout" || t_fail "no leftover draft guidance"
+if grep -Eq -- '--method (PATCH|DELETE|POST)' "$T_ROOT/api-calls"; then t_fail "report mutated a release"; fi
+t_ok "failure reporting distinguishes published releases and drafts without mutating either"
+
 printf 'release-check-selftest: %d checks passed\n' "$T_PASSED"

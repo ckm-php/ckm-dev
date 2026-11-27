@@ -284,10 +284,11 @@ gh workflow run "PHP publish" -R ckm-php/ckm-dev -f run_id=<run id> -f commit=<h
    It writes a summary of tags, files, sizes and SHA256 hashes. Compare the hashes with the files you checked.
 
 2. The run then waits at `publish`. In the run's page, choose "Review deployments", then `release`, then "Approve and deploy". Reject it if anything differs.
+   - While the job runs, no one should create the candidate's tags or edit or publish its drafts. GitHub does not provide an atomic check-and-publish operation.
 3. `publish` then works in two phases:
    - It first refuses unless the `release` environment holds `RELEASE_GATE=armed` (step B).
    - It attests each archive in Sigstore's public log, signed by this workflow (`php-publish.yml`) for these exact files, and creates each release as a draft at the commit. It uploads the files, downloads them again and compares them byte for byte.
-   - Only then does it publish the drafts, which creates the tags. **This uses up the `-ck1` tags.**
+   - Only then does it publish the drafts. It checks each draft's verified asset list again before publishing and checks each new tag's commit before publishing the next draft. **This uses up the `-ck1` tags.**
 4. Check: `gh release list -R ckm-php/ckm-dev`.
 5. Each release names its attestation. `gh attestation verify <archive> --repo ckm-php/ckm-dev --signer-workflow ckm-php/ckm-dev/.github/workflows/php-publish.yml` (`gh` 2.51 or later) checks a downloaded archive against it. Step 7 runs it on every archive.
 
@@ -295,12 +296,12 @@ gh workflow run "PHP publish" -R ckm-php/ckm-dev -f run_id=<run id> -f commit=<h
 
 - **"Check the release environment" refused:** the `release` environment is missing or lacks `RELEASE_GATE=armed`. Nothing was created. Fix the environment (step B), then dispatch "PHP publish" again.
 - **In `prepare`, or before you approve:** nothing was created. Fix the cause, then dispatch "PHP publish" again for the same candidate (still at `main`'s head and within 7 days).
-- **In `publish`, before "Publish the drafts":** no tag exists yet. The job deletes the drafts it made, by id, and its summary says so.
-  - A draft it could not delete must be deleted by hand: Releases → the draft → Delete.
+- **In `publish`, before "Publish the drafts":** no tag exists yet. The job reports the releases it can identify, but never deletes them.
+  - Check Releases for leftovers even if the report is empty. GitHub can create a draft without returning its ID, and it may have an `untagged-…` URL. Delete only an affected release that is still marked **Draft**.
   - Then dispatch "PHP publish" again. Use a new dispatch rather than "Re-run jobs", so `prepare`'s checks run again.
-- **During "Publish the drafts":** the summary lists the versions already published.
+- **During "Publish the drafts":** check the summary and the Releases page for versions already published.
   - Those releases are final. Never delete, edit or re-upload them.
-  - The drafts of the others were deleted.
+  - Check for leftover drafts and delete them by hand only if still marked **Draft**.
   - The same candidate cannot be published again, because `prepare` refuses a set when any of its tags exists. Build a new clean candidate with only the missing lines (for example `-f lines='8.5'`, still with `-f oses='linux macos'`), then repeat steps 4 and 5 for it. It is a new build, so check it again.
 
 **7. Payload, sign, upload.** No AI session open from here to the end of this step.

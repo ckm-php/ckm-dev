@@ -111,7 +111,7 @@ Every other string under `/opt` fails, as do home, temporary, `/usr/local` and `
 
 - **`php-publish.yml` ("PHP publish")** publishes one clean candidate. It runs on dispatch only, with `run_id` and `commit` inputs.
   - **`prepare`** (read-only) runs `release-check.sh`, then `release-set.sh --check`, `payload build` and `assets verify` on the candidate's `release-set`. It also checks each tag against the manifest's version and that no release or tag exists yet.
-  - **`publish`** needs the owner's approval in the `release` environment, and refuses unless that environment holds the variable `RELEASE_GATE=armed`. It attests the archives, creates draft releases at the commit, uploads, downloads and compares the files, and then publishes the drafts, which creates the tags last. After a failure it deletes only the drafts it made, by id; a published release is never touched.
+  - **`publish`** needs the owner's approval in the `release` environment, and refuses unless that environment holds the variable `RELEASE_GATE=armed`. It attests the archives, then `release-drafts.sh` creates and tracks each draft by ID, uploads and compares the files, and publishes each checked draft. The tags are created last. After a failure it reports leftover drafts without deleting releases.
 - **`catalog-check.yml` ("Catalog check")** runs `crates/ck-net/tests/published.rs` against what is published, on all three OSes.
 
 The owner's steps around these workflows are in `catalog/README.md`.
@@ -120,11 +120,11 @@ The owner's steps around these workflows are in `catalog/README.md`.
 
 They run in the PHP build's `lint` job and in `/verify`, with no network:
 
-| Script                            | Tests                                                                                                                           |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/fetch-selftest.sh`         | `lib/fetch.sh` and the pin refresh checks, with a stub `curl` and `ck-release`                                                  |
-| `tests/audit-selftest.sh`         | The audit's string rules (`ck_audit_strings`, `ck_audit_null_dir`) on synthetic object files                                    |
-| `tests/release-check-selftest.sh` | Every refusal of `release-check.sh` (fixtures in `tests/fixtures/release-check/`) and the layout and checks of `release-set.sh` |
+| Script                            | Tests                                                                                                                  |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `tests/fetch-selftest.sh`         | `lib/fetch.sh` and the pin refresh checks, with a stub `curl` and `ck-release`                                         |
+| `tests/audit-selftest.sh`         | The audit's string rules (`ck_audit_strings`, `ck_audit_null_dir`) on synthetic object files                           |
+| `tests/release-check-selftest.sh` | Run and release-set checks, plus draft ID handling, asset verification and failure reporting through a fake GitHub API |
 
 ## Frozen interfaces
 
