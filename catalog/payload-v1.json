@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "sequence": 1,
+  "expires": 1803600000,
+  "runtimes": [
+    {
+      "name": "php",
+      "version": "8.5.13-ck1",
+      "license": "PHP-3.01",
+      "artifacts": [
+        {
+          "os": "linux",
+          "arch": "x86_64",
+          "url": "https://github.com/ckm-php/ckm-dev/releases/download/php-8.5.13-ck1/php-8.5.13-ck1-linux-x86_64.tar.gz",
+          "sha256": "886089943727b4642d425b9da91e94d89abd0aa4dce8aab1243ad5df0cbd1ad6",
+          "size": 37620965,
+          "format": "tar.gz"
+        },
+        {
+          "os": "macos",
+          "arch": "aarch64",
+          "url": "https://github.com/ckm-php/ckm-dev/releases/download/php-8.5.13-ck1/php-8.5.13-ck1-macos-aarch64.tar.gz",
+          "sha256": "1c2d9ee04167036ac6d10abb1b28b72141c19c418f6d8ea39f6ab81ddd60c7c5",
+          "size": 33803453,
+          "format": "tar.gz"
+        }
+      ]
+    }
+  ]
+}
