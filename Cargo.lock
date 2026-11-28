@@ -407,6 +407,7 @@ name = "ck-cli"
 version = "0.1.0"
 dependencies = [
  "ck-core",
+ "ck-net",
  "ck-sys",
  "clap",
  "serde",

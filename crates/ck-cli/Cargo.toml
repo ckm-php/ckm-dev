@@ -7,6 +7,12 @@ publish.workspace = true
 # `cargo run -p ck-cli` runs `ck`, not the test service below.
 default-run = "ck"
 
+# The CLI links TLS only for the install commands. Cross-target clippy uses
+# `--no-default-features`, so `ring` is not built for a foreign target.
+[features]
+default = ["net"]
+net = ["dep:ck-net"]
+
 [[bin]]
 name = "ck"
 path = "src/main.rs"
@@ -20,6 +26,7 @@ path = "tests/support/test_service.rs"
 
 [dependencies]
 ck-core.workspace = true
+ck-net = { workspace = true, optional = true }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

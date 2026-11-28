@@ -23,9 +23,10 @@ use ck_core::catalog::schema::{Platform, RuntimeName, RuntimeVersion};
 use ck_core::catalog::trust::{SIGNING_CONTEXT, Trust};
 use ck_core::catalog::{cached, refresh};
 use ck_core::download::policy::TransportPolicy;
-use ck_core::install::{InstallOutcome, install};
+use ck_core::install::{InstallOutcome, InstalledRuntime, install};
 use ck_core::layout;
 use ck_core::paths::{Paths, Profile};
+use ck_core::runtime::RuntimeService;
 use ck_net::HttpTransport;
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -144,6 +145,84 @@ fn a_catalog_and_an_archive_served_over_loopback_install_and_an_older_catalog_is
             "GET /catalog-v1.json HTTP/1.1",
             "GET /demo-1.2.3.tar.gz HTTP/1.1",
             "GET /catalog-v1.json HTTP/1.1",
+        ]
+    );
+}
+
+#[test]
+fn the_shared_runtime_service_installs_and_lists_a_version_from_a_signed_catalog() {
+    let root = TempRoot::create();
+    let paths = Paths {
+        home: root.path().to_path_buf(),
+        data: root.path().join("data"),
+        profile: Profile::Isolated,
+    };
+    let server = TestServer::start();
+    let catalog_url = server.url("/catalog-v1.json");
+    let archive = demo_archive();
+    let platform = Platform::current().expect("a v1 computer");
+    let runtimes = json!([signing::runtime(
+        "demo",
+        "1.2.3",
+        json!([signing::artifact(
+            platform.os.as_str(),
+            platform.arch.as_str(),
+            &server.url("/demo-1.2.3.tar.gz"),
+            "tar.gz",
+            &archive,
+        )]),
+    )]);
+    let key = TestKey::generate();
+    let catalog_at = |sequence| {
+        key.sign(
+            SIGNING_CONTEXT,
+            &signing::payload(sequence, EXPIRES, runtimes.clone()),
+        )
+        .to_bytes()
+    };
+    server.reply("/catalog-v1.json", Reply::ok(catalog_at(7)));
+    server.reply("/demo-1.2.3.tar.gz", Reply::ok(archive));
+
+    let trust = Trust::new(vec![key.verifying_key()], 0).unwrap();
+    let transport = HttpTransport::new(&TransportPolicy::current(paths.profile));
+    let now = UNIX_EPOCH + Duration::from_secs(NOW);
+    let service = RuntimeService::new(&paths, &trust, &transport, &catalog_url).unwrap();
+
+    let name = RuntimeName::new("demo").unwrap();
+    let version = RuntimeVersion::new("1.2.3").unwrap();
+    let dir = paths.runtime_dir(&name, &version);
+    assert_eq!(
+        service.install("demo", "1.2.3", || now).unwrap(),
+        InstallOutcome::Installed(dir.clone())
+    );
+    assert_eq!(
+        fs::read(dir.join("share/readme.txt")).unwrap(),
+        b"demo 1.2.3\n"
+    );
+    assert_eq!(
+        service.installed().unwrap(),
+        vec![InstalledRuntime { name, version }]
+    );
+    assert_eq!(
+        server.request_lines(),
+        [
+            "GET /catalog-v1.json HTTP/1.1",
+            "GET /demo-1.2.3.tar.gz HTTP/1.1",
+        ]
+    );
+
+    // An installed version returns before a catalog request, even when the
+    // server now offers an older one.
+    server.reply("/catalog-v1.json", Reply::ok(catalog_at(6)));
+    assert_eq!(
+        service.install("demo", "1.2.3", || now).unwrap(),
+        InstallOutcome::AlreadyPresent(dir)
+    );
+    assert_eq!(
+        server.request_lines(),
+        [
+            "GET /catalog-v1.json HTTP/1.1",
+            "GET /demo-1.2.3.tar.gz HTTP/1.1",
         ]
     );
 }

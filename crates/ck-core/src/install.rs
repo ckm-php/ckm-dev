@@ -81,10 +81,10 @@ pub fn install(
     version: &RuntimeVersion,
     now: SystemTime,
 ) -> Result<InstallOutcome> {
-    let dest = paths.runtime_dir(name, version);
-    if is_present(&dest)? {
-        return Ok(InstallOutcome::AlreadyPresent(dest));
+    if let Some(path) = installed_path(paths, name, version)? {
+        return Ok(InstallOutcome::AlreadyPresent(path));
     }
+    let dest = paths.runtime_dir(name, version);
     let platform = Platform::current().ok_or_else(|| Error::NotInCatalog {
         name: name.to_string(),
         version: version.to_string(),
@@ -94,8 +94,8 @@ pub fn install(
 
     sys::check_private_folders(paths)?;
     let _lock = RuntimeLock::try_acquire(paths, name, version)?;
-    if is_present(&dest)? {
-        return Ok(InstallOutcome::AlreadyPresent(dest));
+    if let Some(path) = installed_path(paths, name, version)? {
+        return Ok(InstallOutcome::AlreadyPresent(path));
     }
     remove_leftovers(&paths.downloads_dir(), name, version)?;
     remove_leftovers(&paths.staging_dir(), name, version)?;
@@ -127,14 +127,16 @@ pub fn install(
 pub fn uninstall(paths: &Paths, name: &RuntimeName, version: &RuntimeVersion) -> Result<()> {
     sys::check_private_folders(paths)?;
     let _lock = RuntimeLock::try_acquire(paths, name, version)?;
+    // Check the version path before touching staging, so a link or file at
+    // `runtimes/<name>/` is rejected without cleaning up through it.
+    let installed = installed_path(paths, name, version)?;
     remove_leftovers(&paths.staging_dir(), name, version)?;
-    let dest = paths.runtime_dir(name, version);
-    if !is_present(&dest)? {
+    let Some(dest) = installed else {
         return Err(Error::NotInstalled {
             name: name.to_string(),
             version: version.to_string(),
         });
-    }
+    };
     let staging = paths.new_staging_dir(name, version);
     sys::rename_dir(&dest, &staging).map_err(|e| Error::io("move aside", &dest, e))?;
     let deleted = fs::remove_dir_all(&staging).map_err(|e| {
@@ -208,18 +210,48 @@ impl RuntimeLock {
     }
 }
 
-/// Whether a version folder exists at `dest`. The path is never followed:
-/// a link or a file there is an error, so it is neither reported as
-/// installed nor replaced.
-fn is_present(dest: &Path) -> Result<bool> {
-    match fs::symlink_metadata(dest) {
-        Ok(meta) if meta.is_dir() => Ok(true),
-        Ok(_) => Err(Error::Internal(format!(
-            "{} is not a folder; remove it and try again",
-            dest.display()
-        ))),
+/// The folder of one installed version, if it is there.
+///
+/// This checks the path on disk, not the strings in [`installed`]: on a
+/// case-insensitive volume, a request for `8.5-CK1` resolves to an installed
+/// `8.5-ck1` and needs no catalog. Every folder from `runtimes/` down must be
+/// a real directory; a link or a file at any level is an error, so nothing
+/// planted through a link is treated as installed or replaced.
+pub fn installed_path(
+    paths: &Paths,
+    name: &RuntimeName,
+    version: &RuntimeVersion,
+) -> Result<Option<PathBuf>> {
+    let versions = paths.runtime_versions_dir(name);
+    if !real_dir(&paths.runtimes_dir())? || !real_dir(&versions)? {
+        return Ok(None);
+    }
+    let dest = versions.join(version.as_str());
+    if real_dir(&dest)? {
+        Ok(Some(dest))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Whether `path` is a real folder or absent. A link or any other entry is an
+/// error; the path itself is never followed.
+fn real_dir(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => Ok(true),
+        Ok(meta) => {
+            let reason = if meta.file_type().is_symlink() {
+                "it is a symbolic link"
+            } else {
+                "it is not a folder"
+            };
+            Err(Error::NotPrivate {
+                path: path.to_path_buf(),
+                reason: reason.to_owned(),
+            })
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(Error::io("inspect", dest, e)),
+        Err(e) => Err(Error::io("inspect", path, e)),
     }
 }
 
@@ -372,6 +404,7 @@ mod windows {
     use std::time::Duration;
 
     use crate::error::Result;
+    use crate::layout;
     use crate::paths::Paths;
 
     /// Win32 `ERROR_ACCESS_DENIED` and `ERROR_SHARING_VIOLATION`: another
@@ -386,15 +419,18 @@ mod windows {
     const RENAME_TRIES: u32 = 10;
     const RENAME_PAUSE: Duration = Duration::from_millis(100);
 
-    /// Nothing to check: these folders inherit the data folder's protected
-    /// DACL.
-    pub(super) fn check_private_folders(_paths: &Paths) -> Result<()> {
-        Ok(())
+    /// These folders inherit the data folder's protected DACL, but a link
+    /// planted there would send cleanup and installs outside it. Check every
+    /// one before the lock is taken or any leftover is removed.
+    pub(super) fn check_private_folders(paths: &Paths) -> Result<()> {
+        layout::check_real_dir(&paths.downloads_dir())?;
+        layout::check_real_dir(&paths.runtimes_dir())?;
+        layout::check_real_dir(&paths.staging_dir())
     }
 
-    /// Nothing to check, as for [`check_private_folders`].
-    pub(super) fn check_private_folder(_dir: &Path) -> Result<()> {
-        Ok(())
+    /// The same check for `runtimes/<name>/` before a rename into it.
+    pub(super) fn check_private_folder(dir: &Path) -> Result<()> {
+        layout::check_real_dir(dir)
     }
 
     /// A rename, retried for a bounded time while another process has a file
@@ -609,15 +645,25 @@ mod tests {
         );
         assert_eq!(setup.requests(), 1);
 
-        // A link to a name's folder is never followed, and `.staging` is not
-        // a runtime.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            setup.paths.runtime_versions_dir(&php()),
-            setup.paths.runtimes_dir().join("node"),
-        )
-        .unwrap();
         assert_eq!(installed(&setup.paths).unwrap(), installed_php(&["8.4.3"]));
+
+        // A link to a name's folder is never followed, and `.staging` is not
+        // a runtime. The shared presence check refuses that link too, so a
+        // request for `node 8.4.3` cannot be answered from the linked folder.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                setup.paths.runtime_versions_dir(&php()),
+                setup.paths.runtimes_dir().join("node"),
+            )
+            .unwrap();
+            assert_eq!(installed(&setup.paths).unwrap(), installed_php(&["8.4.3"]));
+            let node = RuntimeName::new("node").unwrap();
+            assert!(matches!(
+                installed_path(&setup.paths, &node, &ver("8.4.3")),
+                Err(Error::NotPrivate { .. })
+            ));
+        }
     }
 
     #[test]

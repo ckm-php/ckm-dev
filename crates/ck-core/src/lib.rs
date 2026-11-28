@@ -10,6 +10,7 @@ pub mod install;
 pub mod ipc;
 pub mod layout;
 pub mod paths;
+pub mod runtime;
 pub mod service;
 pub mod supervisor;
 

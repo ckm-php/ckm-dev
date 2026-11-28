@@ -173,8 +173,9 @@ pub fn cached(paths: &Paths, trust: &Trust) -> Result<Option<Catalog>> {
 /// Fetches the envelope at `url` through `transport`, under
 /// `TransportPolicy::current(paths.profile)`, at most
 /// [`envelope::MAX_CATALOG_BYTES`] and within [`CATALOG_TIMEOUT`], then
-/// [`accept`]s it. When it fails, the cached catalog stays in use while it is
-/// not below the floor.
+/// [`accept`]s it. When it fails, the cached catalog stays on disk while it is
+/// not below the floor; this call returns the error and does not use that
+/// cache.
 pub fn refresh(
     paths: &Paths,
     trust: &Trust,
@@ -182,6 +183,23 @@ pub fn refresh(
     url: &str,
     now: SystemTime,
 ) -> Result<Catalog> {
+    refresh_with(paths, trust, transport, url, || now)
+}
+
+/// [`refresh`] with an injected clock, sampled **after** the fetch and just
+/// before [`accept`], so a catalog that expires during a slow fetch is
+/// refused. Tests use a clock that advances between calls; app code passes
+/// [`SystemTime::now`].
+pub fn refresh_with<F>(
+    paths: &Paths,
+    trust: &Trust,
+    transport: &dyn Transport,
+    url: &str,
+    clock: F,
+) -> Result<Catalog>
+where
+    F: Fn() -> SystemTime,
+{
     let policy = TransportPolicy::current(paths.profile);
     let bytes = fetch::fetch_bytes(
         transport,
@@ -190,7 +208,7 @@ pub fn refresh(
         envelope::MAX_CATALOG_BYTES,
         CATALOG_TIMEOUT,
     )?;
-    accept(paths, trust, &bytes, now)
+    accept(paths, trust, &bytes, clock())
 }
 
 /// The checks that [`accept`] and [`cached`] share: the envelope and its

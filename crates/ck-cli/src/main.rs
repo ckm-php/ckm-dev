@@ -44,6 +44,17 @@ enum Command {
     },
     /// Show the build, profile, folders and IPC endpoint. Creates nothing.
     Paths(JsonFlag),
+    /// Install a runtime version from the signed catalog.
+    #[cfg(feature = "net")]
+    Install {
+        name: String,
+        version: String,
+        #[command(flatten)]
+        flag: JsonFlag,
+    },
+    /// List installed runtime versions.
+    #[cfg(feature = "net")]
+    Installed(JsonFlag),
 }
 
 #[derive(Subcommand)]
@@ -76,6 +87,8 @@ impl Command {
                 SupervisorCommand::Stop(flag) => flag.json,
                 SupervisorCommand::Run { .. } => false,
             },
+            #[cfg(feature = "net")]
+            Self::Install { flag, .. } | Self::Installed(flag) => flag.json,
         }
     }
 }
@@ -125,5 +138,40 @@ async fn dispatch(command: Command, paths: Paths) -> Result<()> {
             SupervisorCommand::Run { .. } => commands::supervisor_run(paths).await,
         },
         Command::Paths(flag) => commands::paths(paths, flag.json),
+        #[cfg(feature = "net")]
+        Command::Install {
+            name,
+            version,
+            flag,
+        } => {
+            let policy = ck_core::download::policy::TransportPolicy::current(paths.profile);
+            let transport = ck_net::HttpTransport::new(&policy);
+            commands::install(&paths, &transport, &name, &version, flag.json)
+        }
+        #[cfg(feature = "net")]
+        Command::Installed(flag) => commands::installed(&paths, flag.json),
+    }
+}
+
+#[cfg(all(test, feature = "net"))]
+mod tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Command};
+
+    #[test]
+    fn install_commands_parse_and_report_json() {
+        let cli = Cli::try_parse_from(["ck", "install", "php", "8.5.13-ck1", "--json"])
+            .expect("parse install");
+        assert!(cli.command.json());
+        let Command::Install { name, version, .. } = cli.command else {
+            panic!("install command was not parsed");
+        };
+        assert_eq!(name, "php");
+        assert_eq!(version, "8.5.13-ck1");
+
+        let cli = Cli::try_parse_from(["ck", "installed", "--json"]).expect("parse installed");
+        assert!(cli.command.json());
+        assert!(matches!(cli.command, Command::Installed(_)));
     }
 }

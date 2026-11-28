@@ -15,6 +15,20 @@ use ck_core::{ErrorCode, Paths, Result, client, supervisor};
 
 use crate::output::{self, PathsBody, ServiceBody, StatusBody, SupervisorBody, SupervisorStopBody};
 
+#[cfg(feature = "net")]
+use std::time::SystemTime;
+
+#[cfg(feature = "net")]
+use crate::output::{InstallBody, InstalledBody, RuntimeBody};
+#[cfg(feature = "net")]
+use ck_core::catalog::trust::{CATALOG_URL, Trust};
+#[cfg(feature = "net")]
+use ck_core::download::transport::Transport;
+#[cfg(feature = "net")]
+use ck_core::layout;
+#[cfg(feature = "net")]
+use ck_core::runtime::RuntimeService;
+
 /// `ck status [--json]`
 pub async fn status(paths: &Paths, json: bool) -> Result<()> {
     let body = match client::connect(paths).await {
@@ -116,4 +130,43 @@ pub fn paths(paths: Paths, json: bool) -> Result<()> {
         format!("Endpoint: {endpoint}"),
     ];
     output::print_line(&lines.join("\n"))
+}
+
+/// `ck install <name> <version> [--json]`. Uses only the compiled trust and
+/// catalog URL; no key, path or URL can be supplied by the caller.
+#[cfg(feature = "net")]
+pub fn install(
+    paths: &Paths,
+    transport: &dyn Transport,
+    name: &str,
+    version: &str,
+    json: bool,
+) -> Result<()> {
+    let trust = Trust::release()?;
+    let url = CATALOG_URL.ok_or_else(|| {
+        ck_core::Error::Internal("no catalog URL is compiled into this build".to_owned())
+    })?;
+    let service = RuntimeService::new(paths, &trust, transport, url)?;
+    let outcome = service.install(name, version, SystemTime::now)?;
+    if json {
+        return output::print_ok(InstallBody::new(name, version, &outcome));
+    }
+    output::print_line(&output::install_line(&InstallBody::new(
+        name, version, &outcome,
+    )))
+}
+
+/// `ck installed [--json]`. Reads the install layout only: no catalog, no
+/// network and no trust check.
+#[cfg(feature = "net")]
+pub fn installed(paths: &Paths, json: bool) -> Result<()> {
+    layout::ensure(paths)?;
+    let found = ck_core::install::installed(paths)?;
+    let body = InstalledBody {
+        runtimes: found.iter().map(RuntimeBody::from).collect(),
+    };
+    if json {
+        return output::print_ok(body);
+    }
+    output::print_line(&output::installed_lines(&body))
 }

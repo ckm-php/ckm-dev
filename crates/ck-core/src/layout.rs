@@ -236,6 +236,9 @@ pub fn ensure(paths: &Paths) -> Result<()> {
         paths.runtimes_dir(),
         paths.staging_dir(),
     ] {
+        // Check before creating anything through the folder, on every OS:
+        // on Windows the DACL check below is only a no-op inheritance rule.
+        check_real_dir(&dir)?;
         create_private_dir(&dir)?;
         // Windows folders inherit the data folder's protected DACL instead.
         #[cfg(unix)]
@@ -266,6 +269,29 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+/// Refuses a link or file at `path` before anything is created through it;
+/// a missing folder is fine. Unix also checks ownership and mode after
+/// creation, and Windows inherits the data folder's DACL, so this one check
+/// is what stops a planted link on Windows.
+pub(crate) fn check_real_dir(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => Ok(()),
+        Ok(meta) => {
+            let reason = if meta.file_type().is_symlink() {
+                "it is a symbolic link"
+            } else {
+                "it is not a folder"
+            };
+            Err(Error::NotPrivate {
+                path: path.to_path_buf(),
+                reason: reason.to_owned(),
+            })
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::io("inspect", path, e)),
+    }
 }
 
 /// Creates one folder, 0700 on Unix. An existing folder is left as it is.

@@ -440,7 +440,7 @@ Re-sign at least every 60 days (a catalog lives 90), whenever the weekly check f
    gh release download catalog-v1 -R ckm-php/ckm-dev -p catalog-v1.json -O - | cmp - catalog/catalog-v1.json
    ```
 
-   The file may be missing for a moment during the replace. An app whose refresh fails then keeps its cached catalog until its next start.
+   The file may be missing for a moment during the replace. Installed runtimes keep working, but `ck install` returns a refresh failure rather than falling back to the cached catalog; the cache is left on disk for a later caller that explicitly uses it.
 
 7. **Finish:** dispatch "Catalog check" with `mode=run`, then make the data-only commit `chore(catalog): catalog sequence <n+1>`.
 

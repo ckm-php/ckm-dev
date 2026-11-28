@@ -9,6 +9,8 @@ use std::io::{self, Write as _};
 use std::path::PathBuf;
 
 use ck_core::branding;
+#[cfg(feature = "net")]
+use ck_core::install::{InstallOutcome, InstalledRuntime};
 use ck_core::ipc::protocol::ServiceStatus;
 use ck_core::paths::{BuildKind, Profile};
 use ck_core::service::ServiceState;
@@ -75,6 +77,60 @@ pub struct ServiceBody {
 pub struct SupervisorStopBody {
     /// False when no supervisor was running.
     pub was_running: bool,
+}
+
+/// Body of `ck install --json`.
+#[cfg(feature = "net")]
+#[derive(Serialize)]
+pub struct InstallBody {
+    pub name: String,
+    pub version: String,
+    pub outcome: &'static str,
+    /// A lossy string, so an unusual path cannot fail serialization after the
+    /// install has already succeeded.
+    pub path: String,
+}
+
+#[cfg(feature = "net")]
+impl InstallBody {
+    /// The command's validated names and the install result.
+    pub fn new(name: &str, version: &str, outcome: &InstallOutcome) -> Self {
+        let (outcome, path) = match outcome {
+            InstallOutcome::Installed(path) => ("installed", path),
+            InstallOutcome::AlreadyPresent(path) => ("already-present", path),
+        };
+        Self {
+            name: name.to_owned(),
+            version: version.to_owned(),
+            outcome,
+            path: path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+/// One installed runtime in `ck installed --json`.
+#[cfg(feature = "net")]
+#[derive(Serialize)]
+pub struct RuntimeBody {
+    pub name: String,
+    pub version: String,
+}
+
+#[cfg(feature = "net")]
+impl From<&InstalledRuntime> for RuntimeBody {
+    fn from(runtime: &InstalledRuntime) -> Self {
+        Self {
+            name: runtime.name.to_string(),
+            version: runtime.version.to_string(),
+        }
+    }
+}
+
+/// Body of `ck installed --json`.
+#[cfg(feature = "net")]
+#[derive(Serialize)]
+pub struct InstalledBody {
+    pub runtimes: Vec<RuntimeBody>,
 }
 
 /// Prints `body` as a successful JSON document on stdout.
@@ -156,6 +212,29 @@ pub fn service_line(service: &ServiceStatus) -> String {
     }
 }
 
+/// The one text line `ck install` prints.
+#[cfg(feature = "net")]
+pub fn install_line(body: &InstallBody) -> String {
+    format!(
+        "{} {}: {} at {}",
+        body.name, body.version, body.outcome, body.path
+    )
+}
+
+/// The text `ck installed` prints: one `name version` line each, or a note
+/// when nothing is installed.
+#[cfg(feature = "net")]
+pub fn installed_lines(body: &InstalledBody) -> String {
+    if body.runtimes.is_empty() {
+        return "No runtimes installed.".to_owned();
+    }
+    body.runtimes
+        .iter()
+        .map(|runtime| format!("{} {}", runtime.name, runtime.version))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The `ck status` table: a header row, then one row per service. Columns
 /// are left-aligned and two spaces apart, and no line ends in spaces.
 pub fn status_table(services: &[ServiceStatus]) -> String {
@@ -196,4 +275,54 @@ pub fn status_table(services: &[ServiceStatus]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(all(test, feature = "net"))]
+mod tests {
+    use serde_json::Value;
+
+    use super::*;
+
+    #[test]
+    fn install_and_installed_bodies_are_one_json_document() {
+        let path = PathBuf::from("runtimes/php/8.5.13-ck1");
+        let install = InstallBody::new(
+            "php",
+            "8.5.13-ck1",
+            &InstallOutcome::Installed(path.clone()),
+        );
+        let document = Document {
+            schema: SCHEMA,
+            ok: true,
+            body: &install,
+        };
+        let text = serde_json::to_string(&document).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["schema"], 1);
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["name"], "php");
+        assert_eq!(value["version"], "8.5.13-ck1");
+        assert_eq!(value["outcome"], "installed");
+        assert_eq!(value["path"], path.to_str().unwrap());
+        assert_eq!(
+            install_line(&install),
+            format!("php 8.5.13-ck1: installed at {}", path.display())
+        );
+
+        let installed = InstalledBody {
+            runtimes: vec![RuntimeBody {
+                name: "php".to_owned(),
+                version: "8.5.13-ck1".to_owned(),
+            }],
+        };
+        let document = Document {
+            schema: SCHEMA,
+            ok: true,
+            body: &installed,
+        };
+        let text = serde_json::to_string(&document).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["runtimes"].as_array().map(Vec::len), Some(1));
+        assert_eq!(installed_lines(&installed), "php 8.5.13-ck1");
+    }
 }
