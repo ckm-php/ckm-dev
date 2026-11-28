@@ -8,7 +8,7 @@ Where everything lives:
 - **The catalog.** `catalog-v1.json` lives on the fixed release `catalog-v1` and is replaced in place at each re-signing. Its URL is compiled into the app (`CATALOG_URL` in `crates/ck-core/src/catalog/trust.rs`): `https://github.com/ckm-php/ckm-dev/releases/download/catalog-v1/catalog-v1.json`.
 - **The keys.** Two Ed25519 release keys (A, the primary, and B, the backup) have their public halves compiled into the app. Their private halves stay with the owner, always encrypted.
 
-No catalog is published yet. The owner's two public keys are compiled into `RELEASE_KEYS` (key A signs; key B is the offline backup), so a release build accepts only a catalog signed by one of them. The first catalog will list PHP 8.5.13 only: the existing immutable PHP 8.5.12 and 7.4.33 releases are not approved for installation from the catalog. Do not change or delete those releases.
+Catalog sequence 1 is published. The owner's two public keys are compiled into `RELEASE_KEYS` (key A signs; key B is the offline backup), so a release build accepts only a catalog signed by one of them. Sequence 1 lists PHP 8.5.13 only: the existing immutable PHP 8.5.12 and 7.4.33 releases are not approved for installation from the catalog. Do not change or delete those releases.
 
 ## Tracked files
 
@@ -90,13 +90,13 @@ From a clean checkout of `main`, the normal release command is:
 catalog/release.sh auto
 ```
 
-It checks CI, runs the probe and the clean build, verifies the candidate, dispatches `PHP publish`, and stops at each human gate. Run the **same command** again after you approve `release` in GitHub, after offline sign/upload, and after the final catalog check. `catalog/release.sh next` prints the current phase and exact next action.
+It checks CI, runs the transport probe only before the first catalog exists, then runs the clean build, verifies the candidate, dispatches `PHP publish`, and stops at each human gate. Once `catalog-v1.json` is on the release, the probe is skipped because its asset was deleted; the final `Catalog check · mode=run` is the transport and install proof. Run the **same command** again after you approve `release` in GitHub, after offline sign/upload, and after the final catalog check. `catalog/release.sh next` prints the current phase and exact next action.
 
 The conductor does **not** approve the release environment, touch a private key, sign, upload, commit, push or test from the app. Those stay owner-only. It keeps run ids, scope and hashes outside the repo in `~/ck-release-work/release-state.json`, and refuses a changed `main` head or a stale candidate.
 
 Escape hatches are `catalog/release.sh prepare [commit]`, `publish`, `catalog-prepare` and `catalog-run`. The detailed runbook below remains the source of truth and the fallback when a phase needs manual recovery.
 
-> Do not commit `catalog/release.sh` while a clean candidate is frozen. Wait until publish finishes.
+> The conductor is committed. For the next release, start from a clean `main` checkout. Do not run it during an in-flight manual release: it would start a new probe/build.
 
 ## Publishing and signing: the owner's runbook
 

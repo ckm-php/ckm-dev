@@ -126,10 +126,26 @@ out_file="$FAKE_RUN_DIR/gh-output.$$"
       n=$((n + 1))
       printf '%s\n' "$n" >"$FAKE_RUN_DIR/counter"
       printf '%s%s\n' "$FAKE_RUN_PREFIX" "$n" >"$FAKE_RUN_DIR/last.$workflow"
+      if [[ ${FAKE_WORKFLOW_NOISE:-0} == 1 ]]; then
+        printf '✓ Created workflow_dispatch event for %s at main\n' "$workflow"
+        printf 'https://github.com/ckm-php/ckm-dev/actions/runs/%s%s\n' \
+          "$FAKE_RUN_PREFIX" "$n"
+      fi
       ;;
     release)
       case "${args[1]}" in
-        view) printf '{"isDraft":false}\n' ;;
+        view)
+          tag=${args[2]}
+          if [[ $tag == catalog-v1 ]]; then
+            if [[ ${FAKE_CATALOG_EXISTS:-0} == 1 ]]; then
+              printf '{"assets":[{"name":"catalog-v1.json"}]}\n'
+            else
+              printf '{"assets":[{"name":"transport-probe.txt"}]}\n'
+            fi
+          else
+            printf '{"isDraft":false}\n'
+          fi
+          ;;
         download)
           tag=${args[2]}
           if [[ $tag == catalog-v1 ]]; then
@@ -262,6 +278,8 @@ new_case() {
   export FAKE_CATALOG_BYTES=''
   export FAKE_GIT_DIRTY=0
   export FAKE_STALE_FIRST=0
+  export FAKE_WORKFLOW_NOISE=0
+  export FAKE_CATALOG_EXISTS=0
   : >"$FAKE_LOG"
   cd "$CASE/work"
 }
@@ -281,6 +299,24 @@ if "$CONDUCTOR" prepare >"$CASE/out" 2>&1; then
 fi
 assert_contains "$CASE/out" 'Catalog check probe run 10001: completed failure' 'failed probe is reported'
 assert_not_contains "$FAKE_LOG" 'workflow run php-build.yml' 'no clean build after a failed probe'
+
+# 2b. noisy `gh workflow run` output must not enter state.
+new_case noisy-dispatch
+export FAKE_WORKFLOW_NOISE=1
+"$CONDUCTOR" prepare >"$CASE/out"
+jq -e '.probe_run_id == "10001" and .clean_run_id == "10002"' \
+  "$CK_RELEASE_STATE_DIR/release-state.json" >/dev/null
+pass 'dispatch output does not pollute recorded run ids'
+
+# 2c. after sequence 1, probe is obsolete because its asset was deleted.
+new_case catalog-exists
+export FAKE_CATALOG_EXISTS=1
+"$CONDUCTOR" prepare >"$CASE/out"
+assert_not_contains "$FAKE_LOG" '-f mode=probe' 'prepare skips the obsolete probe'
+assert_contains "$FAKE_LOG" 'workflow run php-build.yml' 'prepare still starts the clean build'
+jq -e '.probe_run_id == "" and .phase == "clean-ready"' \
+  "$CK_RELEASE_STATE_DIR/release-state.json" >/dev/null
+pass 'catalog-exists state records no probe'
 
 # 3. prepare records probe, clean build and hash check.
 new_case prepare-ok

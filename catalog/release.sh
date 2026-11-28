@@ -12,6 +12,7 @@ CI_WORKFLOW='ci.yml'
 BUILD_WORKFLOW='php-build.yml'
 PUBLISH_WORKFLOW='php-publish.yml'
 CATALOG_WORKFLOW='catalog-check.yml'
+CATALOG_TAG='catalog-v1'
 EXPECTED_LINES='8.5'
 EXPECTED_OSES='linux macos'
 EXPECTED_SEQUENCE='1'
@@ -168,11 +169,18 @@ latest_dispatch_run() {
     --json databaseId --jq '.[0].databaseId // ""'
 }
 
+catalog_exists() {
+  local assets
+  assets=$(gh release view "$CATALOG_TAG" -R "$REPO" --json assets \
+    --jq '[.assets[].name] | join(" ")')
+  [[ " $assets " == *" catalog-v1.json "* ]]
+}
+
 dispatch() {
   local workflow=$1 previous id='' tries=0
   shift
   previous=$(latest_dispatch_run "$workflow")
-  gh workflow run "$workflow" -R "$REPO" "$@"
+  gh workflow run "$workflow" -R "$REPO" "$@" >&2
   while :; do
     id=$(latest_dispatch_run "$workflow")
     if [[ -n $id && $id != "$previous" ]]; then
@@ -236,12 +244,16 @@ do_prepare() {
   esac
 
   check_ci "$head"
-  probe=$(field probe_run_id)
-  if [[ -z $probe ]]; then
-    probe=$(dispatch "$CATALOG_WORKFLOW" -f mode=probe)
-    set_field probe_run_id "$probe"
+  if catalog_exists; then
+    note 'catalog sequence already present; skipping transport probe'
+  else
+    probe=$(field probe_run_id)
+    if [[ -z $probe ]]; then
+      probe=$(dispatch "$CATALOG_WORKFLOW" -f mode=probe)
+      set_field probe_run_id "$probe"
+    fi
+    wait_run "$probe" 'Catalog check probe'
   fi
-  wait_run "$probe" 'Catalog check probe'
 
   clean=$(dispatch "$BUILD_WORKFLOW" \
     --ref main -f clean=true -f lines="$EXPECTED_LINES" -f oses="$EXPECTED_OSES")
