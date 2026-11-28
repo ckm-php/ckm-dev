@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# T5: the string rules of audit.sh. ck_audit_strings allows under /opt only
-# the baked strings it names, each matched whole, and refuses build paths
+# T5: the string rules and Linux glibc boundary of audit.sh.
+# ck_audit_strings allows under /opt only the baked strings it names, each
+# matched whole, and refuses build paths
 # (fileinfo.so's libmagic exception stays scoped to that file);
 # ck_audit_null_dir requires the start-up defaults in the null folder. The
 # object files are synthetic: NUL-separated strings, as a binary holds them.
@@ -135,5 +136,35 @@ T_NOSSL="$T_ROOT/nossl"
 t_object "$T_NOSSL/bin/php" "$T_NULL/php" "$T_NULL/php.d"
 mkdir -p "$T_NOSSL/lib"
 t_expect "null folder: no libcrypto" 1 'expected one libcrypto' ck_audit_null_dir "$T_NOSSL"
+
+if [ "$(ck_os)" = linux ]; then
+  # Feed readelf-style output through the real ELF checks without a compiler
+  # or a dependency on the self-test host's glibc version.
+  t_linux_elf() (
+    local version=$1 CK_AUDIT_ERRORS=0
+    readelf() {
+      case "$1" in
+        -hW) printf '%s\n' '  Machine: Advanced Micro Devices X86-64' '  Type: DYN (Position-Independent Executable file)' ;;
+        -dW)
+          # shellcheck disable=SC2016 # $ORIGIN is literal readelf output
+          printf '%s\n' '  0x1 (NEEDED) Shared library: [libc.so.6]' '  0xf (RPATH) Library rpath: [$ORIGIN/../lib]'
+          ;;
+        -lW) printf '%s\n' '  INTERP' '  GNU_RELRO' '  GNU_STACK 0x0 0x0 0x0 0x0 0x0 RW 0x10' ;;
+        -VW) printf '  0x0010: Name: GLIBC_%s  Flags: none  Version: 2\n' "$version" ;;
+        *) return 1 ;;
+      esac
+    }
+    ck_audit_linux_file "$T_ROOT/elf" "$T_ROOT/elf/bin/php" x86_64
+    printf '%s\n' "$CK_AUDIT_ERRORS"
+  )
+
+  t_object "$T_ROOT/elf/bin/php"
+  [ "$(t_linux_elf 2.39 2>"$T_ROOT/stderr")" = 0 ] || t_fail "GLIBC_2.39 must pass"
+  t_ok "allowed: GLIBC_2.39"
+  [ "$(t_linux_elf 2.40 2>"$T_ROOT/stderr")" = 1 ] || t_fail "GLIBC_2.40 must fail"
+  grep -qF 'needs GLIBC_2.40, above the baseline 2.39' "$T_ROOT/stderr" ||
+    t_fail "GLIBC_2.40: missing baseline diagnostic"
+  t_ok "refused: GLIBC_2.40"
+fi
 
 printf 'audit-selftest: %s checks passed\n' "$T_PASSED"

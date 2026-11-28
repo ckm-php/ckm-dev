@@ -69,8 +69,8 @@ impl Error {
 /// The descriptor schema this tool writes and reads.
 pub const DESCRIPTOR_SCHEMA: u32 = 1;
 
-/// What `pack` writes next to each archive and `payload build` reads: one
-/// archive of one runtime version for one OS and CPU.
+/// What `payload build` reads next to each archive: one runtime version for
+/// one OS and CPU. `pack` produces descriptors for Unix archives.
 ///
 /// ```json
 /// {"schema": 1, "name": "php", "version": "8.5.12-ck1", "license": "PHP-3.01",
@@ -127,9 +127,8 @@ impl Descriptor {
             .map_err(|reason| Error::Invalid(format!("{what}: {reason}")))?;
         lock::check_size(self.size)
             .map_err(|reason| Error::Invalid(format!("{what}: {reason}")))?;
-        if self.format != ArchiveFormat::TarGz {
-            return Err(Error::Invalid(format!("{what}: the format must be tar.gz")));
-        }
+        check_archive_format(self.platform(), self.format)
+            .map_err(|reason| Error::Invalid(format!("{what}: {reason}")))?;
         let expected = asset_file_name(&self.name, &self.version, self.platform());
         if self.file != expected {
             return Err(Error::Invalid(format!(
@@ -153,14 +152,48 @@ impl Descriptor {
     }
 }
 
-/// `<name>-<version>-<os>-<cpu>.tar.gz`, for example
-/// `php-8.5.12-ck1-linux-x86_64.tar.gz`: unique within a release.
+/// `<name>-<version>-<os>-<cpu>.tar.gz` on Unix or `.zip` on Windows.
+/// This only builds a name; it does not validate platform eligibility.
 pub fn asset_file_name(name: &RuntimeName, version: &RuntimeVersion, platform: Platform) -> String {
+    let suffix = archive_suffix(platform_archive_format(platform));
     format!(
-        "{name}-{version}-{}-{}.tar.gz",
+        "{name}-{version}-{}-{}{suffix}",
         platform.os.as_str(),
         platform.arch.as_str()
     )
+}
+
+pub(crate) const fn archive_suffix(format: ArchiveFormat) -> &'static str {
+    match format {
+        ArchiveFormat::TarGz => ".tar.gz",
+        ArchiveFormat::Zip => ".zip",
+    }
+}
+
+const fn platform_archive_format(platform: Platform) -> ArchiveFormat {
+    match platform.os {
+        Os::Linux | Os::Macos => ArchiveFormat::TarGz,
+        Os::Windows => ArchiveFormat::Zip,
+    }
+}
+
+/// Release-tool rules only; the app's catalog schema and trust are unchanged.
+pub(crate) fn check_archive_format(
+    platform: Platform,
+    format: ArchiveFormat,
+) -> Result<(), String> {
+    if platform.os == Os::Windows && platform.arch != Arch::X86_64 {
+        return Err("Windows release assets require x86_64".to_owned());
+    }
+    let expected = platform_archive_format(platform);
+    if format != expected {
+        let suffix = archive_suffix(expected);
+        return Err(format!(
+            "the format for {platform} must be {}",
+            &suffix[1..]
+        ));
+    }
+    Ok(())
 }
 
 /// The release download folder every artifact URL sits under, from

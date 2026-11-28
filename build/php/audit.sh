@@ -39,8 +39,8 @@ if [ -z "${CK_COMMON_SH_LOADED:-}" ]; then
 fi
 CK_AUDIT_SH_LOADED=1
 
-# The Linux baseline: the ubuntu-22.04 runner.
-readonly CK_AUDIT_GLIBC_MAX=2.35
+# The Linux baseline: the ubuntu-24.04 runner.
+readonly CK_AUDIT_GLIBC_MAX=2.39
 readonly CK_AUDIT_GLIBCXX_MAX=3.4.30
 # The macOS baseline.
 readonly CK_AUDIT_MACOS_MIN=12.0

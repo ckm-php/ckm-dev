@@ -110,7 +110,9 @@ ck_refresh_check_host() {
   esac
   host=${rest%%/*}
   case "$host" in
-    www.php.net | github.com | download.gnome.org | www.sqlite.org | curl.se) ;;
+    www.php.net | github.com | download.gnome.org | www.sqlite.org | curl.se | \
+      downloads.php.net | git.almalinux.org | repo.almalinux.org | \
+      security.ubuntu.com | archive.ubuntu.com) ;;
     *) ck_die "host not approved for pins: $host ($url)" ;;
   esac
   [ "$rest" != "$host" ] || ck_die "the URL has no path: $url"

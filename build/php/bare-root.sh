@@ -102,9 +102,13 @@ ck_bare_copy_host() {
 
 # ck_bare_root_linux <archive> <version>
 ck_bare_root_linux() {
-  local archive=$1 version=$2 rootfs php_dir="/ck dev/php" interp header so path gconv status=0
+  local archive=$1 version=$2 rootfs php_dir="/ck dev/php" interp header so path gconv host_glibc status=0
   local -a run sonames
-  ck_require_cmd docker tar readelf
+  ck_require_cmd docker tar readelf getconf
+  # The root borrows the runner's libc; a newer host would not prove the floor.
+  host_glibc=$(LC_ALL=C getconf GNU_LIBC_VERSION) || ck_die "bare root: cannot read the host glibc version"
+  [ "$host_glibc" = "glibc $CK_AUDIT_GLIBC_MAX" ] ||
+    ck_die "bare root: expected host glibc $CK_AUDIT_GLIBC_MAX, got $host_glibc"
   rootfs="$CK_BARE_WORK/rootfs"
   ck_run mkdir -p "$rootfs$php_dir" "$rootfs/tmp"
   ck_run chmod 1777 "$rootfs/tmp"

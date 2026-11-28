@@ -5,5 +5,8 @@
   "workflow": ".github/workflows/php-build.yml",
   "event": "workflow_dispatch",
   "ref": "refs/heads/main",
-  "clean": true
+  "clean": true,
+  "lines": ["8.5"],
+  "oses": ["linux", "macos"],
+  "publishable": true
 }

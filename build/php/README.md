@@ -1,6 +1,6 @@
 # PHP build pipeline
 
-ck-dev builds its own PHP for macOS and Linux (D7, D14). This folder holds the build scripts. They run in GitHub Actions on `ubuntu-22.04` (glibc 2.35) and `macos-15` (deployment target 12.0). Windows uses the official NTS zips and is not built here.
+ck-dev builds its own PHP for macOS and Linux (D7, D14). This folder holds the build scripts. They run in GitHub Actions on `ubuntu-24.04` (glibc 2.39 for new Linux builds) and `macos-15` (deployment target 12.0). The release substrate understands official Windows NTS ZIPs, but the Windows build, install and FastCGI contract are not enabled in the planner yet.
 
 This file is the contract between the scripts, `crates/ck-release` and the app. Everything under [Frozen interfaces](#frozen-interfaces) changes only through a plan.
 
@@ -9,7 +9,7 @@ This file is the contract between the scripts, `crates/ck-release` and the app. 
 - Bash 3.2 features only (macOS ships 3.2). No associative arrays, `mapfile`, namerefs or `${var,,}`. Arguments are kept in arrays and expanded as `"${args[@]}"`. An array that may be empty is expanded as `${args[@]+"${args[@]}"}`, because bash before 4.4 fails on it under `set -u`.
 - Every script sources `lib/common.sh` first. It sets `set -euo pipefail` and `umask 022`.
 - No `sudo` anywhere. The workflow creates the build root on the CI runner. Nothing creates it on a developer's machine.
-- Every download is pinned in `catalog/sources.lock.json` and checked against its SHA256 before use. A mismatch deletes the file and fails. The build never refreshes a pin.
+- Every download is pinned in `catalog/sources.lock.json` and checked against its SHA256 before use. A mismatch deletes the file and fails. The build never refreshes a pin. Pin refresh may use only the hosts in `ck-release`'s exact allow-list. The extra build-only hosts approved 2026-11-28 (`downloads.php.net`, `git.almalinux.org`, `repo.almalinux.org`, `security.ubuntu.com`, `archive.ubuntu.com`) are for CI and review; the app still downloads runtime assets only from verified GitHub Releases.
 - Compilers and tools run in the hermetic environment (`ck_hermetic_env`). Its `PATH` is the stack's `bin/` plus `/usr/bin:/bin:/usr/sbin:/sbin`, never `/usr/local` or Homebrew. `pkg-config` lookups use `PKG_CONFIG_LIBDIR` only, never `PKG_CONFIG_PATH`.
 
 ## Library stacks
@@ -22,6 +22,8 @@ Every library PHP links is built from pinned source, as a shared library, into o
 | `current` | 8.1 and up  | 3       |
 
 `catalog/php-lines.json` gives each line its stack. For a library whose two stacks need different versions, it names a version series per stack (`"openssl": "1.1.1"`), and the lock holds one pin in each series. Every other library has a single pin that both stacks share. `ck-release lock export --stack <stack>` prints the stack's pins, one per library: every pin except `php`, so it includes the build tools and the CA bundle, and on macOS also `patchelf`. Recipes pick the entries they need by name.
+
+Current publishable lines are 8.2, 8.3, 8.4 and 8.5. PHP 7.4 is only in the smoke matrix (`ci_only: true`) until an EOL patch stream is proven; its existing immutable release is untouched. PHP 8.2's official security support ends 2026-12-31, so its eligibility must be rechecked immediately before any publication. EOL 8.0 and 8.1, and the 8.6 stretch line, remain blocked until their provenance and notices are separately approved.
 
 The build tools `pkgconf` and `patchelf` (Linux) are built from pins into each stack's `bin/`. They are never shipped.
 
@@ -50,7 +52,7 @@ The build root is fixed: `/opt/ck-dev-build`. Only root can create it on a user'
 
 ## Archive layout
 
-One `tar.gz` per PHP version, OS and CPU, named `php-<version>-<os>-<cpu>.tar.gz`, for example `php-8.5.12-ck1-linux-x86_64.tar.gz`. It unpacks as is into `runtimes/php/<version>/`, with no wrapping folder and no links.
+One archive per PHP version, OS and CPU, named `php-<version>-<os>-<cpu>.tar.gz` on Linux and macOS, or `.zip` on Windows; for example `php-8.5.13-ck1-linux-x86_64.tar.gz`. A Unix archive unpacks as is into `runtimes/php/<version>/`, with no wrapping folder and no links. The release substrate checks the right suffix and descriptor format for every OS, but no Windows line is eligible to build or ship yet.
 
 ```text
 bin/php  bin/php-fpm  bin/php-cgi
@@ -97,34 +99,42 @@ Every other string under `/opt` fails, as do home, temporary, `/usr/local` and `
 ## Workflows
 
 - **`php-build.yml` ("PHP build")** builds, audits, smoke-tests and packs each line on each OS. It then runs the contract install on a fresh runner and lays out the release set and an unsigned payload. Nothing is published. Its jobs:
-  - **`plan`** computes the matrix and uploads the `build-info` artifact (`build-info.json`: `commit`, `run_id`, `run_attempt`, `workflow`, `event`, `ref` and `clean`).
-  - **`lint`** runs shellcheck, `bash -n` and the three self-tests.
+  - **`plan`** calls `plan-matrix.sh` and uploads the `build-info` artifact (`build-info.json`: `commit`, `run_id`, `run_attempt`, `workflow`, `event`, `ref`, `clean`, the normalized `lines` and `oses`, and `publishable`). The planner reads eligibility and stacks from `catalog/php-lines.json`, and combines the source pin in `catalog/sources.lock.json` with the build revision to get each expected release version. Only the planner's static OS/arch/runner combinations can run.
+  - **`lint`** runs shellcheck, `bash -n` and the self-tests below.
   - **`tool`, `deps`, `php` and `contract`** build `ck-release`, the library stacks, PHP, and the contract install.
-  - **`payload`** merges the `php-*` artifacts into one flat folder, runs `release-set.sh` (with `--allow-partial` unless both OSes were built) and `ck-release payload build` (sequence 1, 90 days). It uploads the `release-set` and `catalog-payload-candidate` artifacts.
+  - **`payload`** merges the `php-*` artifacts into one flat folder, runs `release-set.sh` and `ck-release payload build` (sequence 1, 90 days). A publishable run replays its planned `lines` and `oses` with `--scope`; a test run uses the full `push` policy with `--allow-partial`. `release-set.sh` derives expected tags and platforms from `plan-matrix.sh` in both cases. It uploads the `release-set` and `catalog-payload-candidate` artifacts.
 - **Clean mode.** A dispatch with `clean=true` is the only run that can feed publishing (D25):
-  - It needs both OSes (`oses='linux macos'`).
+  - It needs every eligible platform for every selected line, and all selected lines must share the requested OS scope. Any publishable line can be selected; the first signing candidate is `lines='8.5'`, `oses='linux macos'`. PHP 7.4 stays in smoke coverage only; unverified EOL builds cannot be clean candidates.
   - It restores and saves no `actions/cache` and no `rust-cache` in any job.
-  - It records `clean: true` in `build-info`.
+  - It records `clean: true`, the normalized `lines` and `oses`, and `publishable: true` in `build-info`.
   - It runs in a concurrency group of its own and is never cancelled.
 
-  Pushes, pull requests and other dispatches are test runs and may use the caches. The run's artifacts (`build-info`, archives, `release-set`) are kept 7 days.
+  Pushes and pull requests smoke all configured line/platform pairs. Non-clean dispatches may select a subset using the `lines` and `oses` filters. Test runs may use the caches. The run's artifacts (`build-info`, archives, `release-set`) are kept 7 days.
 
 - **`php-publish.yml` ("PHP publish")** publishes one clean candidate. It runs on dispatch only, with `run_id` and `commit` inputs.
-  - **`prepare`** (read-only) runs `release-check.sh`, then `release-set.sh --check`, `payload build` and `assets verify` on the candidate's `release-set`. It also checks each tag against the manifest's version and that no release or tag exists yet.
+  - **`prepare`** (read-only) runs `release-check.sh`, replays the recorded scope through `plan-matrix.sh`, then runs `release-set.sh --scope`, `payload build` and `assets verify` on the candidate's `release-set`. It also checks each tag against the manifest's version and that no release or tag exists yet.
   - **`publish`** needs the owner's approval in the `release` environment, and refuses unless that environment holds the variable `RELEASE_GATE=armed`. It attests the archives, then `release-drafts.sh` creates and tracks each draft by ID, uploads and compares the files, and publishes each checked draft. The tags are created last. After a failure it reports leftover drafts without deleting releases.
 - **`catalog-check.yml` ("Catalog check")** runs `crates/ck-net/tests/published.rs` against what is published, on all three OSes.
 
 The owner's steps around these workflows are in `catalog/README.md`.
 
+### Before enabling a different release scope
+
+- **Release set and payload:** Done for mixed Unix lines and the Windows ZIP substrate: `release-set.sh` takes expected tags and platforms from `plan-matrix.sh`, either the all-publishable `release` plan or the clean dispatch's recorded `--scope`, and compares the entire set (missing and extra versions). It accepts `.tar.gz` on Unix and `.zip` on Windows. `ck-release payload build` and `assets verify` use each descriptor's format and keep the descriptor, size, hash and SHA256SUMS checks. A new OS still needs a planner platform entry and its own build path.
+- **Publish:** The publish workflow carries the checked set's tags and scope through preparation, approval and upload; the tags come from the scoped release set and are checked against that same scoped planner result. It still attests only `*.tar.gz`; generalize that line and add a Windows install/CLI/FastCGI contract before publishing Windows. Recompute expectations from the candidate commit and keep the clean-run, immutable-tag, owner-approval and post-upload gates. Do not change an existing release to add a platform; use a new build revision.
+- **Catalog smoke:** Check actual catalog entries against the release-specific expected platforms, not the latest build matrix applied retroactively to older immutable releases. Replace the Windows fetch-only fallback with an install and CLI/FastCGI smoke once a signed release actually includes Windows. Keep catalog signing offline.
+- **New PHP lines:** Recheck upstream security support immediately before publication. PHP 8.2's support ends 2026-12-31; EOL 7.4/8.0/8.1 stay blocked unless a pinned, redistributable patch stream is proven. The first signed catalog is the Unix-only 8.5 set from a clean `lines='8.5'`, `oses='linux macos'` dispatch; 8.2/8.3/8.4 remain publishable for later scoped catalogs.
+
 ## Self-tests
 
 They run in the PHP build's `lint` job and in `/verify`, with no network:
 
-| Script                            | Tests                                                                                                                  |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `tests/fetch-selftest.sh`         | `lib/fetch.sh` and the pin refresh checks, with a stub `curl` and `ck-release`                                         |
-| `tests/audit-selftest.sh`         | The audit's string rules (`ck_audit_strings`, `ck_audit_null_dir`) on synthetic object files                           |
-| `tests/release-check-selftest.sh` | Run and release-set checks, plus draft ID handling, asset verification and failure reporting through a fake GitHub API |
+| Script                            | Tests                                                                                                                                                      |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/fetch-selftest.sh`         | `lib/fetch.sh` and the pin refresh checks, with a stub `curl` and `ck-release`                                                                             |
+| `tests/audit-selftest.sh`         | The audit's string rules (`ck_audit_strings`, `ck_audit_null_dir`) on synthetic object files                                                               |
+| `tests/release-check-selftest.sh` | Run, scope and release-set checks, plus draft ID handling, asset verification and failure reporting through a fake GitHub API                              |
+| `tests/plan-matrix-selftest.sh`   | Matrix selection, normalized scope and publishable output, stacks, release versions, static platform allow-list and refusal of incomplete clean candidates |
 
 ## Frozen interfaces
 
@@ -133,12 +143,13 @@ They run in the PHP build's `lint` job and in `/verify`, with no network:
 - **`catalog/sources.lock.json`:** `{"schema": 1, "entries": [...]}`. Each entry is `{name, version, url, sha256, size, license, signature}`, in that key order. Only `ck-release lock set` writes it, and `ck-release` refuses a file that is not byte for byte its canonical form (entries sorted by name, then version; two-space JSON; one trailing newline). Prettier ignores it.
   - `name`: `[a-z0-9][a-z0-9-]{0,31}`. The PHP source is `php`.
   - `version`: `ck-core`'s runtime version rule. A `php` version is `X.Y.Z`, and its line `X.Y` must be in `php-lines.json`, with at most one pin per line.
-  - `url`: HTTPS, written in normal form, with no user, port, query or fragment. Its host is exactly one of `www.php.net`, `github.com`, `download.gnome.org`, `www.sqlite.org` or `curl.se`. Its last segment is a safe file name: `[A-Za-z0-9][A-Za-z0-9._+-]*`, at most 128 bytes, no `..`.
+  - `url`: HTTPS, written in normal form, with no user, port, query or fragment. Its host is exactly one of `www.php.net`, `github.com`, `download.gnome.org`, `www.sqlite.org`, `curl.se`, `downloads.php.net`, `git.almalinux.org`, `repo.almalinux.org`, `security.ubuntu.com` or `archive.ubuntu.com`. The last five are build-only sources for pin refresh; the app never downloads runtime assets from them. Its last segment is a safe file name: `[A-Za-z0-9][A-Za-z0-9._+-]*`, at most 128 bytes, no `..`.
   - `sha256`: 64 lower-case hex characters. `size`: 1 byte to 2 GiB.
   - `license`: SPDX, 1 to 128 bytes, no control characters.
   - `signature`: what the pin refresh checked upstream besides the hash: `gpg`, `minisig`, `sha256-file` or `none`.
   - No two entries share a name and version (versions compare ignoring case). Unknown fields are refused.
-- **`catalog/php-lines.json`:** hand-edited, holds no pins. `{"schema": 1, "stacks": {<stack>: {<library>: <series>}}, "lines": [...]}`. Each line is `{line, stack, build_revision, license, extensions: {builtin, default, optional}}`.
+- **`catalog/php-lines.json`:** hand-edited, holds no pins. `{"schema": 1, "stacks": {<stack>: {<library>: <series>}}, "lines": [...]}`. Each line is `{line, stack, platforms, ci_only, build_revision, license, extensions: {builtin, default, optional}}`.
+  - `platforms` is the nonempty list of unique `<os>-<arch>` IDs eligible for that line, chosen from the planner's allow-list. `ci_only: true` allows test builds but not clean candidates.
   - `build_revision` starts at 1. `license` is the catalog licence, PHP's own (`PHP-3.01`); library licences ship inside the archive.
   - Extension names are lower case, as configure and the `.so` files spell them. `builtin` is compiled in, `default` is shared and on, `optional` is shared and off. A name is in one class only.
   - A series matches a version that equals it, or starts with it followed by anything but a digit: `3.5` matches `3.5.9` but not `3.50.1`, and `1.1.1` matches `1.1.1w`.
@@ -170,8 +181,8 @@ ck-release key check --key <file|->
 - `export` with `--stack` fails when a library the stack names a series for has no pin in it. With `--line` it fails when the line has no `php` pin.
 - `set` adds or replaces the entry with that name and version, checks both files, then replaces the lock atomically. It prints nothing.
 - `pack` requires the archive's file name to be `<name>-<version>-<os>-<cpu>.tar.gz`, and writes the descriptor.
-- `payload build` reads `--releases`: one folder per runtime release, named by its tag `<name>-<version>` (D25), holding what `gh release download <tag> -D <dir>/<tag>` writes: the archives, their descriptors and `SHA256SUMS`, and nothing else. It measures each archive's SHA256 and size, which must equal its descriptor and `SHA256SUMS`, and writes the unsigned payload in `ck-core`'s catalog schema 1 as two-space JSON with a trailing newline (the canonical form). Each URL is `<prefix><name>-<version>/<file>`, where the prefix is the release download folder of `ck-core`'s compiled `CATALOG_URL` (`https://github.com/ckm-php/ckm-dev/releases/download/`), and must pass the app's download policy (HTTPS on `github.com`). The old `--descriptors <dir> --base-url <url>` form is gone.
-- `assets verify` checks that every artifact in the payload matches `<releases>/<name>-<version>/<file>` by size and SHA256. It prints `ok: <n> artifacts match the release files`.
+- `payload build` reads `--releases`: one folder per runtime release, named by its tag `<name>-<version>` (D25), holding what `gh release download <tag> -D <dir>/<tag>` writes: the archives, their descriptors and `SHA256SUMS`, and nothing else. Archives are `<stem>.tar.gz` on Linux/macOS and `<stem>.zip` on Windows; each descriptor's `format` must agree with its OS. It measures each archive's SHA256 and size, which must equal its descriptor and `SHA256SUMS`, and writes the unsigned payload in `ck-core`'s catalog schema 1 as two-space JSON with a trailing newline (the canonical form). Each URL is `<prefix><name>-<version>/<file>`, where the prefix is the release download folder of `ck-core`'s compiled `CATALOG_URL` (`https://github.com/ckm-php/ckm-dev/releases/download/`), and must pass the app's download policy (HTTPS on `github.com`). The old `--descriptors <dir> --base-url <url>` form is gone.
+- `assets verify` checks the format for each artifact's OS and that every artifact in the payload matches `<releases>/<name>-<version>/<file>` by size and SHA256. It prints `ok: <n> artifacts match the release files`.
 - `sign` and `key check` refuse to run when `CI` or `GITHUB_ACTIONS` is set (to any value), before reading the key, and run on Linux and macOS only.
   - `--key -` reads the key from stdin: the unencrypted PKCS#8 PEM that `openssl pkey -in <encrypted key>` prints, so the tool never sees the passphrase and the decrypted key never touches the disk. It refuses stdin that is a terminal, so a key is never typed or pasted. `--key <file>` is for throwaway test keys: a regular file (not a link) owned by the current user, mode 0600, outside this repository.
   - The PEM must hold exactly one `PRIVATE KEY` block whose DER is the 16-byte Ed25519 prefix `302e020100300506032b657004220420` plus the 32-byte seed. Key material is never printed, and no error quotes it.
@@ -182,21 +193,24 @@ ck-release key check --key <file|->
 
 ### Release scripts
 
-`release-set.sh` and `release-check.sh` are used by the workflows. They print a `ck-build:` error and exit 1 on any refusal; `release-set.sh` exits 2 on bad usage.
+`plan-matrix.sh`, `release-set.sh` and `release-check.sh` are used by the workflows. The release scripts print a `ck-build:` error and exit 1 on any refusal; `release-set.sh` exits 2 on bad usage.
 
 ```text
-release-set.sh [--allow-partial] <artifacts-dir> <out-dir>
-release-set.sh [--allow-partial] --check <dir>
+plan-matrix.sh <push|pull_request|workflow_dispatch|release> [<lines> <oses> <true|false>]
+release-set.sh [--allow-partial | --scope <lines> <oses>] <artifacts-dir> <out-dir>
+release-set.sh [--allow-partial | --scope <lines> <oses>] --check <dir>
 ```
 
+- **`plan-matrix.sh`** is the only reader of line and platform eligibility. It prints one JSON object with `tool`, `deps`, `php` and `complete` matrices, the normalized `lines` and `oses`, and a `publishable` flag; it needs no network, build tools or build root. `push` and `pull_request` select all configured pairs. `workflow_dispatch` takes whitespace-delimited `lines` and `oses` filters plus a `true|false` clean flag; a clean dispatch is publishable. `release` selects every non-CI-only line on all its eligible platforms as an all-publishable planning mode, but publication uses the candidate's exact `--scope`. The static platform allow-list still has only Linux x86_64 on `ubuntu-24.04` and macOS aarch64 on `macos-15`; Windows waits for its own build path. A clean or release plan refuses CI-only lines, missing platforms and a line whose OS scope differs from the others. Each PHP version comes from the lock pin and the line's `build_revision`.
+
 - **`release-set.sh`** builds the release set: one folder per tag, `php-<X.Y.Z>-ck<N>`, which `payload build --releases` reads and the publish workflow uploads.
-  - **Input:** `<artifacts-dir>` is flat. It holds the run's `php-<os>-<X.Y>` artifacts merged into one folder (`download-artifact` with `merge-multiple`), and only archives `php-<version>-<os>-<cpu>.tar.gz` with their descriptors.
+  - **Input:** `<artifacts-dir>` is flat. It holds the run's `php-<os>-<X.Y>` artifacts merged into one folder (`download-artifact` with `merge-multiple`), and only archives `php-<version>-<os>-<cpu>.tar.gz` (`.zip` for Windows) with their descriptors.
   - **Output:** `<out-dir>` must not exist. Each version's folder gets its archives, their descriptors and `SHA256SUMS`, which is byte for byte what `sha256sum` writes for the archives, in name order.
-  - **Checks:** it then checks the result as `--check` does. Each folder must hold exactly the archive and descriptor of each platform plus `SHA256SUMS`. Each descriptor must name its archive, version and platform, and its SHA256 and size must equal the archive's.
-  - **Platforms:** every version needs both v1 platforms, `linux-x86_64` and `macos-aarch64`. `--allow-partial` accepts fewer, for one-OS test builds only. A publishable set never uses it.
+  - **Checks:** it then checks the result as `--check` does. Each folder must hold exactly the archive and descriptor of each expected platform plus `SHA256SUMS`. Each descriptor must name its archive, version and platform, and its SHA256 and size must equal the archive's.
+  - **Policy:** the expected tags and platform sets come from `plan-matrix.sh`. A clean publish set uses `--scope <lines> <oses>` to replay the candidate's recorded selection; the default `release` plan covers every publishable line and is the all-lines planning mode. A scoped or release set must contain every expected version exactly, with no extras. `--allow-partial` switches to the full `push` policy and accepts fewer platforms for test builds only, including CI-only lines; it still refuses unknown versions and extra files. A publishable set never uses it.
 - **`release-check.sh`** is the publish gate's run check. It takes no arguments and reads only its environment and two files, with no network.
   - **Inputs:** `RUN_JSON` (the REST API's `GET /repos/<repo>/actions/runs/<id>`), `BUILD_INFO` (the run's `build-info.json`), `RUN_ID`, `COMMIT`, `EXPECTED_WORKFLOW_PATH`, and the publish run's own `GITHUB_SHA`, `GITHUB_REF` and `GITHUB_REPOSITORY`.
-  - **What it accepts:** the commit equals `GITHUB_SHA`, on `refs/heads/main`. The run is that id, of that workflow, in this repository with this repository as its head. It is a `workflow_dispatch` on `main` at that commit, `completed` with `success`. Its `build-info.json` holds exactly the keys `clean`, `commit`, `event`, `ref`, `run_attempt`, `run_id` and `workflow`, with `clean: true` and values that agree.
+  - **What it accepts:** the commit equals `GITHUB_SHA`, on `refs/heads/main`. The run is that id, of that workflow, in this repository with this repository as its head. It is a `workflow_dispatch` on `main` at that commit, `completed` with `success`. Its `build-info.json` holds exactly the keys `clean`, `commit`, `event`, `lines`, `oses`, `publishable`, `ref`, `run_attempt`, `run_id` and `workflow`, with `clean: true`, `publishable: true`, a well-formed scope and values that agree. The scope is then replayed through `plan-matrix.sh` before any files are checked.
 
 ### `lock export` lines
 
@@ -251,7 +265,7 @@ optional  ftp shmop soap ...
 }
 ```
 
-### `lib/common.sh`
+`pack` writes only the Unix `.tar.gz` form. `payload build` and `assets verify` also accept a Windows descriptor whose `file` ends in `.zip` and whose `format` is `zip`, but no Windows line is built in this milestone.
 
 | Function                      | Does                                                                                                                                                                                                                           |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -282,12 +296,12 @@ Sourcing also defines the read-only `CK_BUILD_ROOT` and `CK_REPO_ROOT`. It creat
 
 `/bin/bash build/php/build.sh <stage> <arg>`. Exit codes: 0 ok, 1 failure, 2 usage. `deps` and `php` need an absolute `CK_RELEASE_BIN` and a writable `/opt/ck-dev-build`. `audit` and `bare-root` need neither, so they run on a fresh runner.
 
-| Stage                    | Does                                                                                                                                                                                    |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `deps <legacy\|current>` | Builds the stack into `<root>/deps/<stack>`. It also saves each library's licence files in `share/ck-licenses/<name>-<version>/`, which the cached prefix carries to the `php` stage.   |
-| `php <X.Y>`              | Builds PHP for the line, then relocates, audits, smoke-tests and packs it. Stdout holds only two lines: the archive path, then the descriptor path, both in `<root>/out`.               |
-| `audit <root>`           | The static audit (T6) of an unpacked root                                                                                                                                               |
-| `bare-root <archive>`    | T7. Linux runs the archive in a bare root holding only glibc, its iconv codecs and the allow-listed system libraries (`docker import`, no network). macOS runs it with Homebrew hidden. |
+| Stage                    | Does                                                                                                                                                                                                                             |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deps <legacy\|current>` | Builds the stack into `<root>/deps/<stack>`. It also saves each library's licence files in `share/ck-licenses/<name>-<version>/`, which the cached prefix carries to the `php` stage.                                            |
+| `php <X.Y>`              | Builds PHP for the line, then relocates, audits, smoke-tests and packs it. Stdout holds only two lines: the archive path, then the descriptor path, both in `<root>/out`.                                                        |
+| `audit <root>`           | The static audit (T6) of an unpacked root                                                                                                                                                                                        |
+| `bare-root <archive>`    | T7. Linux verifies the runner has glibc 2.39, then runs the archive in a bare root holding only glibc, its iconv codecs and the allow-listed system libraries (`docker import`, no network). macOS runs it with Homebrew hidden. |
 
 ### `lib/fetch.sh`
 

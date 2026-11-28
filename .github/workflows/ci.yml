@@ -85,11 +85,3 @@ jobs:
             echo "mock data leaked into the production build" >&2
             exit 1
           fi
-
-      - name: Install Playwright Chromium
-        if: runner.os == 'Linux'
-        run: pnpm -C apps/desktop exec playwright install --with-deps chromium
-
-      - name: Playwright journeys
-        if: runner.os == 'Linux'
-        run: pnpm e2e

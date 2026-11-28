@@ -120,10 +120,37 @@
     },
     {
       "name": "php",
-      "version": "8.5.12",
-      "url": "https://www.php.net/distributions/php-8.5.12.tar.xz",
-      "sha256": "08bc2eba2a588654ade1357174aa646b761556c862dda0678345ee29ed481209",
-      "size": 14554312,
+      "version": "8.2.36",
+      "url": "https://www.php.net/distributions/php-8.2.36.tar.xz",
+      "sha256": "df50a00d2b453096608bf2bd98a9fab9a3df8678a77b93011b65c3cfe9a018fa",
+      "size": 12229968,
+      "license": "PHP-3.01",
+      "signature": "gpg"
+    },
+    {
+      "name": "php",
+      "version": "8.3.37",
+      "url": "https://www.php.net/distributions/php-8.3.37.tar.xz",
+      "sha256": "0237af84478b7a7649d3964153f1b8653d622550b846f56d63062de683fb86bb",
+      "size": 12682796,
+      "license": "PHP-3.01",
+      "signature": "gpg"
+    },
+    {
+      "name": "php",
+      "version": "8.4.28",
+      "url": "https://www.php.net/distributions/php-8.4.28.tar.xz",
+      "sha256": "0c8ec360e5dd8154f270b2fd50cd44ecc824e6ee39c85f911312b80d4daecd72",
+      "size": 13911008,
+      "license": "PHP-3.01",
+      "signature": "gpg"
+    },
+    {
+      "name": "php",
+      "version": "8.5.13",
+      "url": "https://www.php.net/distributions/php-8.5.13.tar.xz",
+      "sha256": "607602acaf0c3061818e9916ec44a058e8b3d43959a83862b9cd3ec7bf5b785f",
+      "size": 14600508,
       "license": "PHP-3.01",
       "signature": "gpg"
     },

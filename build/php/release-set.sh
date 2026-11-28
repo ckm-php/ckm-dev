@@ -3,26 +3,32 @@
 # its tag `<name>-<version>` (D25), as `ck-release payload build --releases`
 # reads it and as the publish workflow uploads it.
 #
-#   release-set.sh [--allow-partial] <artifacts-dir> <out-dir>
+#   release-set.sh [--allow-partial | --scope <lines> <oses>] <artifacts-dir> <out-dir>
 #       <artifacts-dir> holds the "PHP build" run's `php-<os>-<X.Y>`
 #       artifacts merged into one flat folder (actions/download-artifact
 #       with `merge-multiple`, which also gives the same layout for one
 #       artifact as for several): each archive
-#       `php-<version>-<os>-<cpu>.tar.gz` with its descriptor `.json`, and
-#       nothing else. Writes <out-dir> (which must not exist) with one folder
-#       per version holding every platform's archive and descriptor plus
-#       SHA256SUMS, then checks it as `--check` does.
+#       `php-<version>-<os>-<cpu>.tar.gz` (`.zip` on Windows) with its
+#       descriptor `.json`, and nothing else. Writes <out-dir> (which must not
+#       exist) with one folder per version holding every required platform's
+#       archive and descriptor plus SHA256SUMS, then checks it as `--check`
+#       does.
 #
-#   release-set.sh [--allow-partial] --check <dir>
+#   release-set.sh [--allow-partial | --scope <lines> <oses>] --check <dir>
 #       Checks a release set: each folder holds exactly the archive and the
-#       descriptor of each required platform and SHA256SUMS; each descriptor
-#       names its archive, version and platform, and its SHA256 and size
-#       equal the archive's; SHA256SUMS is byte for byte what `sha256sum`
-#       writes for the archives in name order, and lists nothing else.
+#       descriptor of each platform the manifest requires for that version and
+#       SHA256SUMS; each descriptor names its archive, version and platform,
+#       and its SHA256 and size equal the archive's; SHA256SUMS is byte for
+#       byte what `sha256sum` writes for the archives in name order, and lists
+#       nothing else.
 #
-# Every version needs both v1 platforms, linux-x86_64 and macos-aarch64.
-# `--allow-partial` accepts a version with only some of them, for test
-# builds of one OS; a publishable set never uses it.
+# The expected tags, versions and platforms come from `plan-matrix.sh`, which
+# reads the same manifest and lock as the build planner. `--scope` replays the
+# clean dispatch's recorded `lines` and `oses`, so a first catalog can contain
+# one line while later catalogs can contain more. The default `release` plan
+# covers every non-CI-only line on its full platform set. `--allow-partial` uses
+# `push` (all lines) and accepts a version with only some of its platforms, for
+# test builds of one OS.
 
 RS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=lib/common.sh
@@ -31,21 +37,71 @@ RS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # Glob order is byte order, as `ck-release` and SHA256SUMS sort names.
 export LC_ALL=C
 
-# The v1 platforms (D17) that build PHP, as <os>-<cpu>, in byte order: the
-# order of their archives in SHA256SUMS.
-RS_PLATFORMS="linux-x86_64 macos-aarch64"
 RS_TAG_RE='^php-[0-9]+\.[0-9]+\.[0-9]+-ck[1-9][0-9]*$'
-RS_STEM_RE='^(php-[0-9]+\.[0-9]+\.[0-9]+-ck[1-9][0-9]*)-(linux|macos)-(x86_64|aarch64)$'
+RS_STEM_RE='^(php-[0-9]+\.[0-9]+\.[0-9]+-ck[1-9][0-9]*)-(linux|macos|windows)-(x86_64|aarch64)$'
 RS_PARTIAL=0
+RS_REQUIRE_ALL=1
+RS_POLICY_MODE=release
+RS_POLICY_LABEL=release
+RS_SCOPE_LINES=
+RS_SCOPE_OSES=
+RS_POLICY_JSON=
+RS_EXPECTED=
 RS_TMP=$(mktemp -d "${TMPDIR:-/tmp}/ck-release-set.XXXXXX")
 trap 'rm -rf -- "$RS_TMP"' EXIT
 
 rs_usage() {
   cat >&2 <<'EOF'
-usage: release-set.sh [--allow-partial] <artifacts-dir> <out-dir>
-       release-set.sh [--allow-partial] --check <dir>
+usage: release-set.sh [--allow-partial | --scope <lines> <oses>] <artifacts-dir> <out-dir>
+       release-set.sh [--allow-partial | --scope <lines> <oses>] --check <dir>
 EOF
   exit 2
+}
+
+# plan-matrix.sh is the one reader of line/platform eligibility. Keep its
+# refusal text but give every planner failure this script's exit code.
+rs_plan() {
+  local err
+  if ! RS_POLICY_JSON=$(bash "$RS_DIR/plan-matrix.sh" "$@" 2>"$RS_TMP/plan.err"); then
+    err=$(tr '\n' ' ' <"$RS_TMP/plan.err")
+    ck_die "release-set: the planner refused the policy: $err"
+  fi
+}
+
+rs_load_policy() {
+  if [ "$RS_POLICY_MODE" = workflow_dispatch ]; then
+    rs_plan workflow_dispatch "$RS_SCOPE_LINES" "$RS_SCOPE_OSES" true
+  else
+    rs_plan "$RS_POLICY_MODE"
+  fi
+  RS_EXPECTED=$(jq -r '
+    .php.include
+    | group_by(.version)[]
+    | "php-\(.[0].version)\t" + (map("\(.os)-\(.arch)") | unique | sort | join(" "))
+  ' <<<"$RS_POLICY_JSON")
+  [ -n "$RS_EXPECTED" ] || ck_die "release-set: the matrix planner has no expected releases"
+}
+
+# rs_platforms_of <tag>: the required platforms as <os>-<cpu>, byte order.
+rs_platforms_of() {
+  awk -F '\t' -v tag="$1" '$1 == tag {print $2; exit}' <<<"$RS_EXPECTED"
+}
+
+# rs_format_of <os>: the archive format the release tool uses for that OS.
+rs_format_of() {
+  case "$1" in
+    windows) echo zip ;;
+    *) echo tar.gz ;;
+  esac
+}
+
+# rs_cpu_of <os>: the one CPU each OS is built for.
+rs_cpu_of() {
+  case "$1" in
+    linux | windows) echo x86_64 ;;
+    macos) echo aarch64 ;;
+    *) ck_die "release-set: unknown OS $1" ;;
+  esac
 }
 
 # rs_sha256 <file>: prints the file's SHA256 in lower-case hex.
@@ -66,15 +122,6 @@ rs_size() {
   printf '%s\n' "$((size + 0))"
 }
 
-# rs_cpu_of <os>: the one CPU each OS is built for.
-rs_cpu_of() {
-  case "$1" in
-    linux) echo x86_64 ;;
-    macos) echo aarch64 ;;
-    *) ck_die "release-set: unknown OS $1" ;;
-  esac
-}
-
 # rs_real_dir <path>: dies unless the path is a folder and not a link.
 rs_real_dir() {
   if [ -L "$1" ] || [ ! -d "$1" ]; then
@@ -89,18 +136,23 @@ rs_real_file() {
   fi
 }
 
-# rs_descriptor <descriptor> <archive> <name-version> <os>: checks the
-# descriptor against its archive and the version and OS it must describe.
+# rs_descriptor <descriptor> <archive> <tag> <platform>: checks both files
+# against the tag, platform, format and measured bytes.
 rs_descriptor() {
-  local descriptor=$1 archive=$2 tag=$3 os=$4 cpu stem fields expected
-  cpu=$(rs_cpu_of "$os")
+  local descriptor=$1 archive=$2 tag=$3 platform=$4
+  local os=${platform%-*} cpu=${platform#*-} format stem suffix fields expected
+  format=$(rs_format_of "$os")
+  case "$format" in
+    tar.gz) suffix=.tar.gz ;;
+    zip) suffix=.zip ;;
+  esac
   stem="$tag-$os-$cpu"
   rs_real_file "$descriptor"
   rs_real_file "$archive"
   [ "$(basename "$descriptor")" = "$stem.json" ] ||
     ck_die "release-set: $descriptor is not named $stem.json"
-  [ "$(basename "$archive")" = "$stem.tar.gz" ] ||
-    ck_die "release-set: $archive is not named $stem.tar.gz"
+  [ "$(basename "$archive")" = "$stem$suffix" ] ||
+    ck_die "release-set: $archive is not named $stem$suffix"
   # Every field, in a fixed order; a missing, extra or mistyped field fails.
   fields=$(jq -er '
     if type == "object"
@@ -115,14 +167,14 @@ rs_descriptor() {
     then [.name, .version, .os, .cpu, .file, .format, .sha256, (.size | tostring)] | join(" ")
     else error("bad descriptor") end' "$descriptor" 2>/dev/null) ||
     ck_die "release-set: $descriptor is not a descriptor (fields or types are wrong)"
-  expected="${tag%%-*} ${tag#*-} $os $cpu $stem.tar.gz tar.gz $(rs_sha256 "$archive") $(rs_size "$archive")"
+  expected="${tag%%-*} ${tag#*-} $os $cpu $stem$suffix $format $(rs_sha256 "$archive") $(rs_size "$archive")"
   [ "$fields" = "$expected" ] ||
     ck_die "release-set: $descriptor does not describe $archive (name, version, platform, file, format, SHA256 or size differ)"
 }
 
 # rs_check <dir>: checks a release set (see the header).
 rs_check() {
-  local dir=$1 folder tag entry version platform os cpu stem found sums count want
+  local dir=$1 folder tag entry platforms platform os cpu stem suffix found sums count want
   local folders=0
   rs_real_dir "$dir"
   for folder in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
@@ -130,22 +182,28 @@ rs_check() {
     tag=$(basename "$folder")
     rs_real_dir "$folder"
     [[ $tag =~ $RS_TAG_RE ]] || ck_die "release-set: $folder is not named php-<X.Y.Z>-ck<N>"
-    version=${tag#php-}
+    platforms=$(rs_platforms_of "$tag")
+    [ -n "$platforms" ] || ck_die "release-set: $tag is not an expected release in the $RS_POLICY_LABEL plan"
 
     found=0
     sums="$RS_TMP/SHA256SUMS"
     : >"$sums"
-    for platform in $RS_PLATFORMS; do
+    for platform in $platforms; do
       os=${platform%-*}
       cpu=${platform#*-}
+      format=$(rs_format_of "$os")
+      case "$format" in
+        tar.gz) suffix=.tar.gz ;;
+        zip) suffix=.zip ;;
+      esac
       stem="$tag-$os-$cpu"
-      if [ -e "$folder/$stem.tar.gz" ] || [ -e "$folder/$stem.json" ] ||
-        [ -L "$folder/$stem.tar.gz" ] || [ -L "$folder/$stem.json" ]; then
-        rs_descriptor "$folder/$stem.json" "$folder/$stem.tar.gz" "php-$version" "$os"
-        printf '%s  %s\n' "$(rs_sha256 "$folder/$stem.tar.gz")" "$stem.tar.gz" >>"$sums"
+      if [ -e "$folder/$stem$suffix" ] || [ -e "$folder/$stem.json" ] ||
+        [ -L "$folder/$stem$suffix" ] || [ -L "$folder/$stem.json" ]; then
+        rs_descriptor "$folder/$stem.json" "$folder/$stem$suffix" "$tag" "$platform"
+        printf '%s  %s\n' "$(rs_sha256 "$folder/$stem$suffix")" "$stem$suffix" >>"$sums"
         found=$((found + 1))
       elif [ "$RS_PARTIAL" -eq 0 ]; then
-        ck_die "release-set: $folder has no $platform archive; every version needs $RS_PLATFORMS"
+        ck_die "release-set: $folder has no $platform archive; this version requires $platforms"
       fi
     done
     [ "$found" -gt 0 ] || ck_die "release-set: $folder holds no archive"
@@ -167,11 +225,16 @@ rs_check() {
     folders=$((folders + 1))
   done
   [ "$folders" -gt 0 ] || ck_die "release-set: $dir holds no release folder"
+  if [ "$RS_REQUIRE_ALL" -eq 1 ]; then
+    while IFS=$'\t' read -r tag _; do
+      [ -d "$dir/$tag" ] || ck_die "release-set: $dir has no $tag release folder (expected in the $RS_POLICY_LABEL plan)"
+    done <<<"$RS_EXPECTED"
+  fi
 }
 
 # rs_build <artifacts-dir> <out-dir>: lays out the artifacts (see the header).
 rs_build() {
-  local artifacts=$1 out=$2 entry name stem tag os cpu archive matched
+  local artifacts=$1 out=$2 entry name stem tag os cpu format suffix archive matched
   rs_real_dir "$artifacts"
   if [ -e "$out" ] || [ -L "$out" ]; then
     ck_die "release-set: $out already exists"
@@ -185,27 +248,46 @@ rs_build() {
     name=$(basename "$entry")
     case "$name" in
       *.tar.gz) stem=${name%.tar.gz} ;;
+      *.zip) stem=${name%.zip} ;;
       *.json) stem=${name%.json} ;;
       *) ck_die "release-set: $entry is neither an archive nor a descriptor" ;;
     esac
     [[ $stem =~ $RS_STEM_RE ]] ||
       ck_die "release-set: $entry is not named php-<X.Y.Z>-ck<N>-<os>-<cpu>"
-    [ -e "$artifacts/$stem.tar.gz" ] || ck_die "release-set: $entry has no archive $stem.tar.gz"
+    os=${BASH_REMATCH[2]}
+    format=$(rs_format_of "$os")
+    case "$format" in
+      tar.gz) suffix=.tar.gz ;;
+      zip) suffix=.zip ;;
+    esac
+    [ -e "$artifacts/$stem$suffix" ] || ck_die "release-set: $entry has no archive $stem$suffix"
     [ -e "$artifacts/$stem.json" ] || ck_die "release-set: $entry has no descriptor $stem.json"
   done
 
   matched=0
-  for archive in "$artifacts"/*.tar.gz; do
+  for archive in "$artifacts"/*.tar.gz "$artifacts"/*.zip; do
     [ -e "$archive" ] || [ -L "$archive" ] || continue
-    stem=$(basename "$archive" .tar.gz)
+    name=$(basename "$archive")
+    case "$name" in
+      *.tar.gz) stem=${name%.tar.gz} ;;
+      *.zip) stem=${name%.zip} ;;
+    esac
     [[ $stem =~ $RS_STEM_RE ]] || ck_die "release-set: $archive is not named php-<X.Y.Z>-ck<N>-<os>-<cpu>"
     tag=${BASH_REMATCH[1]}
     os=${BASH_REMATCH[2]}
     cpu=${BASH_REMATCH[3]}
-    [ "$cpu" = "$(rs_cpu_of "$os")" ] || ck_die "release-set: $archive is not for a v1 platform ($RS_PLATFORMS)"
-    rs_descriptor "$artifacts/$stem.json" "$archive" "$tag" "$os"
+    [ "$cpu" = "$(rs_cpu_of "$os")" ] ||
+      ck_die "release-set: $archive is not for a supported platform"
+    [ -n "$(rs_platforms_of "$tag")" ] ||
+      ck_die "release-set: $tag is not an expected release in the $RS_POLICY_LABEL plan"
+    format=$(rs_format_of "$os")
+    case "$format" in
+      tar.gz) suffix=.tar.gz ;;
+      zip) suffix=.zip ;;
+    esac
+    rs_descriptor "$artifacts/$stem.json" "$archive" "$tag" "$os-$cpu"
     mkdir -p "$out/$tag"
-    cp -- "$archive" "$out/$tag/$stem.tar.gz"
+    cp -- "$archive" "$out/$tag/$stem$suffix"
     cp -- "$artifacts/$stem.json" "$out/$tag/$stem.json"
     matched=$((matched + 1))
   done
@@ -214,9 +296,14 @@ rs_build() {
   # SHA256SUMS lists the archives in name order, as sha256sum writes them.
   for tag in "$out"/*; do
     : >"$tag/SHA256SUMS"
-    for archive in "$tag"/*.tar.gz; do
-      printf '%s  %s\n' "$(rs_sha256 "$archive")" "$(basename "$archive")" >>"$tag/SHA256SUMS"
+    : >"$RS_TMP/names"
+    for archive in "$tag"/*.tar.gz "$tag"/*.zip; do
+      [ -e "$archive" ] || [ -L "$archive" ] || continue
+      printf '%s\n' "$(basename "$archive")" >>"$RS_TMP/names"
     done
+    while IFS= read -r name; do
+      printf '%s  %s\n' "$(rs_sha256 "$tag/$name")" "$name" >>"$tag/SHA256SUMS"
+    done < <(sort "$RS_TMP/names")
   done
 
   rs_check "$out"
@@ -224,10 +311,25 @@ rs_build() {
 
 rs_main() {
   ck_require_cmd jq cmp
-  if [ "${1:-}" = --allow-partial ]; then
-    RS_PARTIAL=1
-    shift
-  fi
+  case "${1:-}" in
+    --allow-partial)
+      RS_PARTIAL=1
+      RS_REQUIRE_ALL=0
+      RS_POLICY_MODE=push
+      RS_POLICY_LABEL=push
+      shift
+      ;;
+    --scope)
+      [ "$#" -ge 3 ] || rs_usage
+      [ "$RS_PARTIAL" -eq 0 ] || rs_usage
+      RS_SCOPE_LINES=$2
+      RS_SCOPE_OSES=$3
+      RS_POLICY_MODE=workflow_dispatch
+      RS_POLICY_LABEL="clean $RS_SCOPE_LINES on $RS_SCOPE_OSES"
+      shift 3
+      ;;
+  esac
+  rs_load_policy
   case "${1:-}" in
     --check)
       [ "$#" -eq 2 ] || rs_usage

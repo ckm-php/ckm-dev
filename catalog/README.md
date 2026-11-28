@@ -8,7 +8,7 @@ Where everything lives:
 - **The catalog.** `catalog-v1.json` lives on the fixed release `catalog-v1` and is replaced in place at each re-signing. Its URL is compiled into the app (`CATALOG_URL` in `crates/ck-core/src/catalog/trust.rs`): `https://github.com/ckm-php/ckm-dev/releases/download/catalog-v1/catalog-v1.json`.
 - **The keys.** Two Ed25519 release keys (A, the primary, and B, the backup) have their public halves compiled into the app. Their private halves stay with the owner, always encrypted.
 
-No catalog is published yet. The owner's two public keys are compiled into `RELEASE_KEYS` (key A signs; key B is the offline backup), so a release build accepts only a catalog signed by one of them. The runbook below takes the project from here to the first signed catalog.
+No catalog is published yet. The owner's two public keys are compiled into `RELEASE_KEYS` (key A signs; key B is the offline backup), so a release build accepts only a catalog signed by one of them. The first catalog will list PHP 8.5.13 only: the existing immutable PHP 8.5.12 and 7.4.33 releases are not approved for installation from the catalog. Do not change or delete those releases.
 
 ## Tracked files
 
@@ -21,6 +21,7 @@ No catalog is published yet. The owner's two public keys are compiled into `RELE
 
 - The rules for the first two files are in `build/php/README.md` ("Frozen interfaces"). `ck-release` refuses a lock that is not in its canonical form, an unknown field, a URL outside the build hosts (`www.php.net`, `github.com`, `download.gnome.org`, `www.sqlite.org`, `curl.se`) and duplicates.
 - Check both: `cargo run -p ck-release -- lock check`.
+- A PHP patch refresh replaces the previous source pin for the same minor line.
 - The build hosts are for the build and the pin refresh only. The app's downloader still allows only `github.com` and GitHub's asset hosts.
 - A commit that changes only `payload-v1.json` and `catalog-v1.json` does not rebuild PHP: the PHP build's path filter names only the lock and `php-lines.json` in this folder.
 
@@ -246,12 +247,12 @@ gh workflow run "Catalog check" -R ckm-php/ckm-dev -f mode=probe
 **3. Clean candidate.** Pass all three inputs:
 
 ```bash
-gh workflow run "PHP build" -R ckm-php/ckm-dev -f clean=true -f lines='7.4 8.5' -f oses='linux macos'
+gh workflow run "PHP build" -R ckm-php/ckm-dev -f clean=true -f lines='8.5' -f oses='linux macos'
 gh run list -R ckm-php/ckm-dev --workflow php-build.yml --event workflow_dispatch -L 3 \
   --json databaseId,headSha,status,conclusion
 ```
 
-- The `oses` default (`linux`) is refused for a clean build. The `lines` default (`8.5`) would build a candidate without 7.4.
+- The `oses` default (`linux`) is refused for a clean build. Build only 8.5 for this candidate; a PHP 7.4 release already exists and must not be republished.
 - A clean run restores no cache, so it takes longer than a test run, and nothing cancels it.
 - Note its run id (`databaseId`) and commit (`headSha`). The commit must be `main`'s current head.
 - **From now until the publish run, push nothing to `main`.** Publishing requires the candidate's commit to be `main`'s head. A push in between means a new candidate.
@@ -313,24 +314,29 @@ First, the checkout and the tool (ground rules): `git fetch origin`, `git status
 
 ```bash
 mkdir -p ~/ck-release-work && mkdir ~/ck-release-work/releases
-for t in php-7.4.33-ck1 php-8.5.12-ck1; do
-  gh release download "$t" -R ckm-php/ckm-dev -D ~/ck-release-work/releases/"$t"
-done
+gh release download php-8.5.13-ck1 -R ckm-php/ckm-dev -D ~/ck-release-work/releases/php-8.5.13-ck1
 ( set -e; n=0
   for f in ~/ck-release-work/releases/*/*.tar.gz; do
     gh attestation verify "$f" --repo ckm-php/ckm-dev \
       --signer-workflow ckm-php/ckm-dev/.github/workflows/php-publish.yml
     n=$((n+1))
   done
+  test "$n" -eq 2
   echo "all $n archives verified" )
 ```
 
-It must end with `all <N> archives verified`. Any failure stops it with a non-zero exit and no such line; stop there. Then build the payload and compare its hashes with what you approved:
+It must end with `all 2 archives verified`. Any failure stops it with a non-zero exit and no such line; stop there. Then build the payload and compare its hashes with what you approved:
 
 ```bash
 ./target/debug/ck-release payload build --releases ~/ck-release-work/releases \
   --sequence 1 --expires <about 90 days ahead, such as 2027-02-17T00:00:00Z> --out catalog/payload-v1.json
 git status --porcelain     # only catalog/payload-v1.json
+jq -e '
+  .sequence == 1 and
+  (.runtimes | length == 1) and
+  (.runtimes[0] | .name == "php" and .version == "8.5.13-ck1" and
+    ([.artifacts[] | "\(.os)/\(.arch)"] | sort == ["linux/x86_64", "macos/aarch64"]))
+' catalog/payload-v1.json
 jq -r '.runtimes[].artifacts[] | "\(.sha256)  \(.url | split("/") | last)"' catalog/payload-v1.json
 ```
 
@@ -350,8 +356,8 @@ gh release delete-asset catalog-v1 transport-probe.txt -R ckm-php/ckm-dev -y
   - Linux: `date -u -d '+90 days' +%Y-%m-%dT00:00:00Z`
   - macOS: `date -u -v+90d +%Y-%m-%dT00:00:00Z`
 - **`payload build`** measures every archive and checks it against its descriptor and `SHA256SUMS`. It refuses a stray file or folder.
-- **`assets verify`** prints `ok: 4 artifacts match the release files`. It is mandatory: never sign a payload it did not pass.
-- **Read `catalog/payload-v1.json` before signing,** because it is what you sign: two runtimes and four artifacts, every URL under `https://github.com/ckm-php/ckm-dev/releases/download/`.
+- **`assets verify`** prints `ok: 2 artifacts match the release files`. It is mandatory: never sign a payload it did not pass.
+- **Read `catalog/payload-v1.json` before signing.** It must contain only PHP `8.5.13-ck1` with two artifacts, Linux x86_64 and macOS arm64, both under `https://github.com/ckm-php/ckm-dev/releases/download/`.
 - **`sign`** writes nothing unless every rule passes:
   - the payload is in canonical form, and its URLs are exactly where `payload build` puts them;
   - the expiry is 7 to 100 days ahead;
@@ -374,7 +380,7 @@ On Linux and macOS it fetches and verifies the catalog, installs each PHP into a
 **9. Data-only commit.** Commit `catalog/payload-v1.json` and `catalog/catalog-v1.json` alone:
 
 ```text
-chore(catalog): catalog sequence 1 (php 7.4.33-ck1, 8.5.12-ck1)
+chore(catalog): catalog sequence 1 (php 8.5.13-ck1)
 ```
 
 Push it only after publishing is complete: it moves `main`'s head, so any later publish needs a new candidate anyway.

@@ -32,15 +32,22 @@ pub const LOCK_SCHEMA: u32 = 1;
 /// The manifest schema this tool reads.
 pub const MANIFEST_SCHEMA: u32 = 1;
 
-/// The only hosts a pinned URL may name (owner, 2026-11-19). Hosts compare
-/// exactly, never by suffix. GitHub's redirect to its asset host is the
-/// fetcher's concern; the lock records only the first URL.
+/// The only hosts a pinned URL may name. Hosts compare exactly, never by
+/// suffix. GitHub's redirect to its asset host is the fetcher's concern; the
+/// lock records only the first URL. The five sources added 2026-11-28 are
+/// approved for CI and pin refresh only: the app continues to download
+/// runtime assets solely from verified GitHub Releases.
 pub const APPROVED_HOSTS: &[&str] = &[
     "www.php.net",
     "github.com",
     "download.gnome.org",
     "www.sqlite.org",
     "curl.se",
+    "downloads.php.net",
+    "git.almalinux.org",
+    "repo.almalinux.org",
+    "security.ubuntu.com",
+    "archive.ubuntu.com",
 ];
 
 /// The lock entry name of the PHP source itself.
@@ -314,6 +321,10 @@ pub struct Line {
     /// The minor line, such as `8.5`.
     pub line: String,
     pub stack: Stack,
+    /// Platform IDs with build coverage for this line.
+    pub platforms: Vec<String>,
+    /// When true, the build planner allows smoke runs but not clean candidates.
+    pub ci_only: bool,
     /// The `N` in `8.5.12-ckN`. Raised for a rebuild of the same PHP patch.
     pub build_revision: u32,
     /// The catalog licence: PHP's own. Library licences ship in the archive.
@@ -390,6 +401,11 @@ impl Manifest {
                     line.stack.as_str()
                 )));
             }
+            if line.platforms.is_empty()
+                || line.platforms.iter().collect::<HashSet<_>>().len() != line.platforms.len()
+            {
+                return Err(wrap("platforms must be nonempty and unique".to_owned()));
+            }
             if line.build_revision == 0 {
                 return Err(wrap("build_revision starts at 1".to_owned()));
             }
@@ -446,10 +462,19 @@ impl Inputs {
         Self::new(Lock::load(lock)?, Manifest::load(manifest)?)
     }
 
-    /// [`Lock::set`], then the cross-file rules. The caller saves the lock.
+    /// Sets a pin and checks the cross-file rules. PHP has one source pin
+    /// per minor line; a patch refresh replaces that line's previous pin.
+    /// Other pins still use [`Lock::set`]'s exact-version rule.
     pub fn set(&mut self, entry: LockEntry) -> Result<()> {
         entry.validate()?;
         let mut lock = self.lock.clone();
+        if entry.name.as_str() == PHP
+            && let Some(line) = php_line_of(entry.version.as_str())
+        {
+            lock.entries.retain(|old| {
+                old.name.as_str() != PHP || php_line_of(old.version.as_str()) != Some(line)
+            });
+        }
         lock.set(entry);
         lock.validate()?;
         let candidate = Self {
@@ -923,6 +948,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_approved_host_is_accepted_exactly() {
+        for host in APPROVED_HOSTS {
+            let url = format!("https://{host}/a.tar.gz");
+            let lock = json!({"schema": 1, "entries": [entry("openssl", "3.5.9", &url)]});
+            assert!(
+                Lock::parse(lock.to_string().as_bytes()).is_ok(),
+                "{host} must be accepted"
+            );
+            let suffix = format!("https://{host}.example.com/a.tar.gz");
+            let lock = json!({"schema": 1, "entries": [entry("openssl", "3.5.9", &suffix)]});
+            assert!(
+                Lock::parse(lock.to_string().as_bytes()).is_err(),
+                "a host suffix must still be refused: {suffix}"
+            );
+        }
+    }
+
     /// Stacks pick their own series, an ambiguous library is refused, a
     /// line finds its php pin, and the export formats stay as frozen.
     #[test]
@@ -933,6 +976,7 @@ mod tests {
                 "stacks": {"legacy": {"openssl": "1.1.1"}, "current": {"openssl": "3.5"}},
                 "lines": [{
                     "line": "8.5", "stack": "current", "build_revision": 2, "license": "PHP-3.01",
+                    "platforms": ["linux-x86_64", "macos-aarch64"], "ci_only": false,
                     "extensions": {"builtin": ["ctype"], "default": ["curl", "intl"], "optional": []}
                 }]
             })
@@ -1006,6 +1050,23 @@ mod tests {
     }
 
     #[test]
+    fn setting_a_php_patch_replaces_only_its_minor_line() {
+        let mut inputs = Inputs::load(&default_lock_path(), &default_manifest_path()).unwrap();
+        let other = inputs.php_entry("7.4").unwrap().clone();
+        let count = inputs.lock.entries.len();
+        let new: LockEntry = serde_json::from_value(entry(
+            "php",
+            "8.5.99",
+            "https://www.php.net/distributions/php-8.5.99.tar.xz",
+        ))
+        .unwrap();
+        inputs.set(new).unwrap();
+        assert_eq!(inputs.php_entry("8.5").unwrap().version.as_str(), "8.5.99");
+        assert_eq!(inputs.php_entry("7.4").unwrap(), &other);
+        assert_eq!(inputs.lock.entries.len(), count);
+    }
+
+    #[test]
     fn tracked_files_load() {
         let inputs = Inputs::load(&default_lock_path(), &default_manifest_path()).unwrap();
         let lines: Vec<&str> = inputs
@@ -1014,6 +1075,6 @@ mod tests {
             .iter()
             .map(|line| line.line.as_str())
             .collect();
-        assert_eq!(lines, ["7.4", "8.5"]);
+        assert_eq!(lines, ["7.4", "8.2", "8.3", "8.4", "8.5"]);
     }
 }

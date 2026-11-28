@@ -14,7 +14,7 @@
 //!   `ck_core::extract` refuses: `pack` fails instead of leaving them out.
 //!
 //! The same tree always packs to the same bytes. Packing runs on Linux and
-//! macOS only, where the builds are; on Windows [`pack`] returns an error.
+//! macOS only and only produces Unix release assets, never Windows ZIPs.
 
 use std::path::Path;
 
@@ -68,7 +68,9 @@ mod unix {
     use tar::{Builder, EntryType, Header};
 
     use super::{PACK_MTIME, PackSpec};
-    use crate::{DESCRIPTOR_SCHEMA, Descriptor, Error, Result, asset_file_name, lock};
+    use crate::{
+        DESCRIPTOR_SCHEMA, Descriptor, Error, Result, asset_file_name, check_archive_format, lock,
+    };
 
     const DIR_MODE: u32 = 0o755;
     const EXECUTABLE_MODE: u32 = 0o755;
@@ -83,6 +85,8 @@ mod unix {
     }
 
     pub(super) fn pack(root: &Path, out: &Path, spec: &PackSpec) -> Result<Descriptor> {
+        check_archive_format(spec.platform, ArchiveFormat::TarGz)
+            .map_err(|reason| Error::Invalid(format!("pack: {reason}")))?;
         let file = asset_file_name(&spec.name, &spec.version, spec.platform);
         if out.file_name() != Some(file.as_ref()) {
             return Err(Error::Invalid(format!(

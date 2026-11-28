@@ -95,7 +95,8 @@ rc_main() {
   # What the run wrote about itself. Only a clean run restored no cache.
   keys=$(jq -cr 'if type == "object" then keys | join(",") else "" end' "$BUILD_INFO" 2>/dev/null) ||
     rc_refuse "build-info is not JSON"
-  rc_expect "build-info's keys" "$keys" "clean,commit,event,ref,run_attempt,run_id,workflow"
+  rc_expect "build-info's keys" "$keys" \
+    "clean,commit,event,lines,oses,publishable,ref,run_attempt,run_id,workflow"
   value=$(rc_get "$BUILD_INFO" "build-info's clean marker" .clean boolean)
   rc_expect "build-info's clean marker" "$value" true
   value=$(rc_get "$BUILD_INFO" "build-info's commit" .commit string)
@@ -110,6 +111,21 @@ rc_main() {
   rc_expect "build-info's ref" "$value" refs/heads/main
   value=$(rc_get "$BUILD_INFO" "build-info's run attempt" .run_attempt number)
   [[ $value =~ $digits ]] || rc_refuse "build-info's run attempt is not a positive number"
+
+  # The exact scope is replayed through plan-matrix.sh by the publish
+  # workflow. Check its shape here so that nothing untrusted reaches jq's
+  # join or a shell command in an unexpected form.
+  if ! jq -e '
+    type == "object"
+    and (.lines | type == "array" and length > 0
+         and all(.[]; type == "string" and test("^[0-9]+\\.[0-9]+$")))
+    and (.oses | type == "array" and length > 0
+         and all(.[]; type == "string" and test("^[a-z]+$")))
+  ' "$BUILD_INFO" >/dev/null 2>&1; then
+    rc_refuse "build-info's scope is missing or invalid"
+  fi
+  value=$(rc_get "$BUILD_INFO" "build-info's publishable marker" .publishable boolean)
+  rc_expect "build-info's publishable marker" "$value" true
 
   printf 'release-check: run %s at %s is a clean, successful %s dispatch on main\n' \
     "$RUN_ID" "$COMMIT" "$EXPECTED_WORKFLOW_PATH"

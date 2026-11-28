@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ck_core::catalog::schema::{
-    self, Artifact, Payload, Platform, Runtime, RuntimeName, RuntimeVersion, Sha256Digest,
+    self, ArchiveFormat, Artifact, Payload, Platform, Runtime, RuntimeName, RuntimeVersion,
+    Sha256Digest,
 };
 use ck_core::download::policy::TransportPolicy;
 use sha2::{Digest, Sha256};
@@ -31,7 +32,10 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use url::Url;
 
-use crate::{Descriptor, Error, Result, asset_file_name, lock, to_pretty_json};
+use crate::{
+    Descriptor, Error, Result, archive_suffix, asset_file_name, check_archive_format, lock,
+    to_pretty_json,
+};
 
 /// What every artifact URL prefix ends with.
 const RELEASE_DOWNLOAD: &str = "/releases/download/";
@@ -107,17 +111,22 @@ fn read_releases(releases: &Path) -> Result<Vec<Descriptor>> {
 
 /// The release file names besides the archives and their descriptors.
 const SUMS: &str = "SHA256SUMS";
-const ARCHIVE_SUFFIX: &str = ".tar.gz";
+const TAR_GZ_SUFFIX: &str = archive_suffix(ArchiveFormat::TarGz);
+const ZIP_SUFFIX: &str = archive_suffix(ArchiveFormat::Zip);
 const DESCRIPTOR_SUFFIX: &str = ".json";
 /// `SHA256SUMS` lists a few archives; a larger file is not one.
 const MAX_SUMS_BYTES: u64 = 64 * 1024;
 
+fn archive_stem(name: &str) -> Option<&str> {
+    name.strip_suffix(TAR_GZ_SUFFIX)
+        .or_else(|| name.strip_suffix(ZIP_SUFFIX))
+}
+
 /// One release folder, named by its tag: the archives, a descriptor
-/// `<stem>.json` for each archive `<stem>.tar.gz`, and `SHA256SUMS`.
+/// `<stem>.json` for each `<stem>.tar.gz` or `<stem>.zip`, and `SHA256SUMS`.
 fn read_release(tag: &str, folder: &Path) -> Result<Vec<Descriptor>> {
-    // Names are matched as strings: `Path::file_stem` would cut a version
-    // such as `8.5.12-ck1` at its first dot.
-    let mut archives = BTreeSet::new();
+    // Strip the complete suffix, including both extensions of `.tar.gz`.
+    let mut archives = BTreeMap::new();
     let mut described = BTreeSet::new();
     let mut has_sums = false;
     for (name, path, metadata) in entries(folder)? {
@@ -129,13 +138,19 @@ fn read_release(tag: &str, folder: &Path) -> Result<Vec<Descriptor>> {
         }
         if name == SUMS {
             has_sums = true;
-        } else if let Some(stem) = name.strip_suffix(ARCHIVE_SUFFIX) {
-            archives.insert(stem.to_owned());
+        } else if let Some(stem) = archive_stem(&name) {
+            if let Some(other) = archives.get(stem) {
+                return Err(Error::Invalid(format!(
+                    "{}: {other:?} and {name:?} share descriptor {stem}{DESCRIPTOR_SUFFIX}",
+                    folder.display()
+                )));
+            }
+            archives.insert(stem.to_owned(), name);
         } else if let Some(stem) = name.strip_suffix(DESCRIPTOR_SUFFIX) {
             described.insert(stem.to_owned());
         } else {
             return Err(Error::Invalid(format!(
-                "{} is not an archive (`{ARCHIVE_SUFFIX}`), a descriptor \
+                "{} is not an archive (`{TAR_GZ_SUFFIX}` or `{ZIP_SUFFIX}`), a descriptor \
                  (`{DESCRIPTOR_SUFFIX}`) or {SUMS}",
                 path.display()
             )));
@@ -147,15 +162,15 @@ fn read_release(tag: &str, folder: &Path) -> Result<Vec<Descriptor>> {
             folder.display()
         )));
     }
-    if let Some(stem) = archives.difference(&described).next() {
+    if let Some((stem, file)) = archives.iter().find(|(stem, _)| !described.contains(*stem)) {
         return Err(Error::Invalid(format!(
             "{} has no descriptor {stem}{DESCRIPTOR_SUFFIX}",
-            folder.join(format!("{stem}{ARCHIVE_SUFFIX}")).display()
+            folder.join(file).display()
         )));
     }
-    if let Some(stem) = described.difference(&archives).next() {
+    if let Some(stem) = described.iter().find(|stem| !archives.contains_key(*stem)) {
         return Err(Error::Invalid(format!(
-            "{} has no archive {stem}{ARCHIVE_SUFFIX}",
+            "{} has no archive {stem}{TAR_GZ_SUFFIX} or {stem}{ZIP_SUFFIX}",
             folder.join(format!("{stem}{DESCRIPTOR_SUFFIX}")).display()
         )));
     }
@@ -169,9 +184,7 @@ fn read_release(tag: &str, folder: &Path) -> Result<Vec<Descriptor>> {
 
     let mut listed = BTreeMap::new();
     for (line, name, digest) in read_sums(&sums_path)? {
-        let known = name
-            .strip_suffix(ARCHIVE_SUFFIX)
-            .is_some_and(|stem| archives.contains(stem));
+        let known = archive_stem(&name).and_then(|stem| archives.get(stem)) == Some(&name);
         if !known {
             return Err(Error::Invalid(format!(
                 "{}: line {line} lists a file that is not an archive in this folder",
@@ -187,8 +200,7 @@ fn read_release(tag: &str, folder: &Path) -> Result<Vec<Descriptor>> {
     }
 
     let mut descriptors = Vec::new();
-    for stem in &archives {
-        let file = format!("{stem}{ARCHIVE_SUFFIX}");
+    for (stem, file) in archives {
         let archive = folder.join(&file);
         let descriptor_path = folder.join(format!("{stem}{DESCRIPTOR_SUFFIX}"));
         let mut descriptor = Descriptor::read(&descriptor_path)?;
@@ -460,8 +472,8 @@ pub fn artifact_url(
     Ok(text)
 }
 
-/// Checks that every artifact URL in `payload` is exactly the
-/// [`artifact_url`] of its runtime and platform under `prefix`.
+/// Checks every artifact's release format and that its URL in `payload`
+/// is exactly the [`artifact_url`] of its runtime and platform under `prefix`.
 pub fn check_urls(payload: &Payload, prefix: &str, policy: &TransportPolicy) -> Result<()> {
     for runtime in &payload.runtimes {
         for artifact in &runtime.artifacts {
@@ -469,6 +481,12 @@ pub fn check_urls(payload: &Payload, prefix: &str, policy: &TransportPolicy) -> 
                 os: artifact.os,
                 arch: artifact.arch,
             };
+            check_archive_format(platform, artifact.format).map_err(|reason| {
+                Error::Invalid(format!(
+                    "{} {} for {platform}: {reason}",
+                    runtime.name, runtime.version
+                ))
+            })?;
             let expected = artifact_url(prefix, &runtime.name, &runtime.version, platform, policy)?;
             if artifact.url != expected {
                 return Err(Error::Invalid(format!(
@@ -531,12 +549,12 @@ pub fn read(path: &Path) -> Result<(Vec<u8>, Payload)> {
 /// Shared with `assets`' tests, which read the same release folders.
 #[cfg(test)]
 pub(crate) mod tests {
-    use ck_core::catalog::schema::{Arch, ArchiveFormat, Os};
+    use ck_core::catalog::schema::{Arch, Os};
     use ck_core::paths::Profile;
 
     use super::*;
-    use crate::DESCRIPTOR_SCHEMA;
     use crate::test_support::TempDir;
+    use crate::{DESCRIPTOR_SCHEMA, platform_archive_format};
 
     pub(crate) const PREFIX: &str = "https://github.com/owner/repo/releases/download/";
 
@@ -557,7 +575,7 @@ pub(crate) mod tests {
             cpu,
             file,
             size: 31_457_280,
-            format: ArchiveFormat::TarGz,
+            format: platform_archive_format(Platform { os, arch: cpu }),
         }
     }
 
@@ -744,42 +762,32 @@ pub(crate) mod tests {
 
     pub(crate) const LINUX_8_5: &[u8] = b"php 8.5 for linux x86_64";
     pub(crate) const MACOS_8_5: &[u8] = b"php 8.5 for macos aarch64";
+    const WINDOWS_8_5: &[u8] = b"php 8.5 for windows x86_64";
     pub(crate) const LINUX_7_4: &[u8] = b"php 7.4 for linux x86_64";
 
     /// Writes the folder `<root>/php-<version>` as `gh release download`
     /// leaves it: each archive, its descriptor and `SHA256SUMS`.
     fn write_release(root: &Path, version: &str, archives: &[(Os, Arch, &[u8])]) -> PathBuf {
-        let name = RuntimeName::new("php").unwrap();
-        let version = RuntimeVersion::new(version).unwrap();
-        let folder = root.join(format!("{name}-{version}"));
+        let folder = root.join(format!("php-{version}"));
         fs::create_dir_all(&folder).unwrap();
         let mut sums = String::new();
         for &(os, cpu, bytes) in archives {
-            let file = asset_file_name(&name, &version, Platform { os, arch: cpu });
-            fs::write(folder.join(&file), bytes).unwrap();
-            let sha256 = Sha256Digest::of(bytes);
-            let stem = file.strip_suffix(".tar.gz").unwrap();
-            Descriptor {
-                schema: DESCRIPTOR_SCHEMA,
-                name: name.clone(),
-                version: version.clone(),
-                license: "PHP-3.01".to_owned(),
-                os,
-                cpu,
-                file: file.clone(),
-                sha256,
-                size: bytes.len() as u64,
-                format: ArchiveFormat::TarGz,
-            }
-            .write(&folder.join(format!("{stem}.json")))
-            .unwrap();
-            sums.push_str(&format!("{sha256}  {file}\n"));
+            let mut descriptor = descriptor(version, os, cpu);
+            let file = &descriptor.file;
+            fs::write(folder.join(file), bytes).unwrap();
+            descriptor.sha256 = Sha256Digest::of(bytes);
+            descriptor.size = bytes.len() as u64;
+            let stem = archive_stem(file).unwrap();
+            descriptor
+                .write(&folder.join(format!("{stem}.json")))
+                .unwrap();
+            sums.push_str(&format!("{}  {file}\n", descriptor.sha256));
         }
         fs::write(folder.join("SHA256SUMS"), sums).unwrap();
         folder
     }
 
-    /// `<root>/releases` with two releases, 8.5.12-ck1 for two platforms and
+    /// `<root>/releases` with two releases, 8.5.12-ck1 for three platforms and
     /// 7.4.33-ck1 for one.
     pub(crate) fn good_releases(root: &Path) -> PathBuf {
         let releases = root.join("releases");
@@ -789,6 +797,7 @@ pub(crate) mod tests {
             &[
                 (Os::Linux, Arch::X86_64, LINUX_8_5),
                 (Os::Macos, Arch::Aarch64, MACOS_8_5),
+                (Os::Windows, Arch::X86_64, WINDOWS_8_5),
             ],
         );
         write_release(
@@ -831,6 +840,7 @@ pub(crate) mod tests {
             ("7.4.33-ck1", "linux", LINUX_7_4),
             ("8.5.12-ck1", "linux", LINUX_8_5),
             ("8.5.12-ck1", "macos", MACOS_8_5),
+            ("8.5.12-ck1", "windows", WINDOWS_8_5),
         ]
         .into_iter()
         .map(|(version, os, bytes)| {
@@ -839,6 +849,12 @@ pub(crate) mod tests {
         })
         .collect();
         assert_eq!(listed, expected);
+        let windows = &payload.runtimes[1].artifacts[2];
+        assert_eq!(windows.format, ArchiveFormat::Zip);
+        assert_eq!(
+            windows.url,
+            format!("{PREFIX}php-8.5.12-ck1/php-8.5.12-ck1-windows-x86_64.zip")
+        );
         check_urls(&payload, PREFIX, &release()).unwrap();
     }
 
@@ -887,6 +903,55 @@ pub(crate) mod tests {
             "has no descriptor",
             |releases| fs::remove_file(releases.join(tag).join(format!("{linux}.json"))).unwrap(),
         );
+    }
+
+    #[test]
+    fn payload_build_refuses_wrong_archive_suffixes_and_shared_descriptor_stems() {
+        let tag = "php-8.5.12-ck1";
+        let windows = "php-8.5.12-ck1-windows-x86_64";
+        refuses(
+            "a ZIP and tar.gz with the same descriptor stem",
+            "share descriptor",
+            |releases| {
+                fs::write(releases.join(tag).join(format!("{windows}.tar.gz")), b"x").unwrap()
+            },
+        );
+        refuses(
+            "a Windows archive renamed to tar.gz (also in SHA256SUMS)",
+            "not \"php-8.5.12-ck1-windows-x86_64.tar.gz\"",
+            |releases| {
+                let folder = releases.join(tag);
+                let zip = format!("{windows}.zip");
+                let tar_gz = format!("{windows}.tar.gz");
+                fs::rename(folder.join(&zip), folder.join(&tar_gz)).unwrap();
+                let sums = folder.join(SUMS);
+                let text = fs::read_to_string(&sums).unwrap();
+                fs::write(&sums, text.replace(&zip, &tar_gz)).unwrap();
+            },
+        );
+    }
+
+    #[test]
+    fn descriptors_require_the_platforms_release_format_and_name() {
+        let linux = descriptor("8.5.12-ck1", Os::Linux, Arch::X86_64);
+        let windows = descriptor("8.5.12-ck1", Os::Windows, Arch::X86_64);
+        for invalid in [
+            Descriptor {
+                format: ArchiveFormat::Zip,
+                ..linux
+            },
+            Descriptor {
+                format: ArchiveFormat::TarGz,
+                ..windows.clone()
+            },
+            descriptor("8.5.12-ck1", Os::Windows, Arch::Aarch64),
+            Descriptor {
+                file: windows.file.replace(".zip", ".tar.gz"),
+                ..windows
+            },
+        ] {
+            assert!(Descriptor::parse(&to_pretty_json(&invalid).unwrap()).is_err());
+        }
     }
 
     /// Builds from [`good_releases`] after `change`, and expects a refusal

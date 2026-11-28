@@ -77,6 +77,14 @@ t_check "a run JSON that is not an object is refused" '[.]' . "the run's id is m
 t_check "clean=false is refused" . '.clean = false' "build-info's clean marker is \"false\""
 t_check "clean as a string is refused" . '.clean = "true"' "build-info's clean marker is missing or not a JSON boolean"
 t_check "a missing clean marker is refused" . 'del(.clean)' "build-info's keys"
+t_check "a missing line scope is refused" . 'del(.lines)' "build-info's keys"
+t_check "a malformed line scope is refused" . '.lines = ["8.x"]' \
+  "build-info's scope is missing or invalid"
+t_check "a malformed OS scope is refused" . '.oses = ["linux2"]' \
+  "build-info's scope is missing or invalid"
+t_check "publishable=false is refused" . '.publishable = false' \
+  "build-info's publishable marker is \"false\""
+t_check "a missing publishable marker is refused" . 'del(.publishable)' "build-info's keys"
 t_check "build-info for another commit is refused" \
   . '.commit = "fedcba9876543210fedcba9876543210fedcba98"' "build-info's commit is"
 t_check "build-info for another run is refused" . '.run_id = 2' "build-info's run id is \"2\""
@@ -113,12 +121,20 @@ t_artifact() {
     >"$dir/$stem.json"
 }
 
-# t_artifacts <dir>: both lines on both platforms.
+# t_release_artifacts <dir>: every publishable line on both platforms.
+t_release_artifacts() {
+  local version
+  for version in 8.2.36-ck1 8.3.37-ck1 8.4.28-ck1 8.5.13-ck1; do
+    t_artifact "$1" linux "$version"
+    t_artifact "$1" macos "$version"
+  done
+}
+
+# t_artifacts <dir>: every line, including CI-only 7.4, for partial test builds.
 t_artifacts() {
   t_artifact "$1" linux 7.4.33-ck1
   t_artifact "$1" macos 7.4.33-ck1
-  t_artifact "$1" linux 8.5.12-ck1
-  t_artifact "$1" macos 8.5.12-ck1
+  t_release_artifacts "$1"
 }
 
 # t_set <what> <expected reason, or empty> <release-set.sh args...>
@@ -135,53 +151,78 @@ t_set() {
   t_ok "$what"
 }
 
-t_artifacts "$T_ROOT/a-good"
+t_release_artifacts "$T_ROOT/a-good"
 t_set "a full set of artifacts is laid out" "" "$T_ROOT/a-good" "$T_ROOT/set"
-t_sums=$(cat "$T_ROOT/set/php-8.5.12-ck1/SHA256SUMS")
+t_sums=$(cat "$T_ROOT/set/php-8.5.13-ck1/SHA256SUMS")
 t_expected=$(
-  cd "$T_ROOT/set/php-8.5.12-ck1" &&
-    { sha256sum php-8.5.12-ck1-linux-x86_64.tar.gz php-8.5.12-ck1-macos-aarch64.tar.gz 2>/dev/null ||
-      shasum -a 256 php-8.5.12-ck1-linux-x86_64.tar.gz php-8.5.12-ck1-macos-aarch64.tar.gz; }
+  cd "$T_ROOT/set/php-8.5.13-ck1" &&
+    { sha256sum php-8.5.13-ck1-linux-x86_64.tar.gz php-8.5.13-ck1-macos-aarch64.tar.gz 2>/dev/null ||
+      shasum -a 256 php-8.5.13-ck1-linux-x86_64.tar.gz php-8.5.13-ck1-macos-aarch64.tar.gz; }
 )
 [ "$t_sums" = "$t_expected" ] || t_fail "SHA256SUMS is not what sha256sum writes"
-[ "$(find "$T_ROOT/set" -type f | wc -l)" -eq 10 ] || t_fail "the set does not hold 10 files"
+[ "$(find "$T_ROOT/set" -type f | wc -l)" -eq 20 ] || t_fail "the set does not hold 20 files"
 t_ok "SHA256SUMS is sha256sum's text form, in name order"
 t_set "the laid-out set passes --check" "" --check "$T_ROOT/set"
 
-t_artifact "$T_ROOT/a-linux" linux 8.5.12-ck1
+# A clean dispatch records its exact scope, so the first catalog can hold
+# 8.5 alone while later ones can hold more.
+t_artifact "$T_ROOT/a-scope" linux 8.5.13-ck1
+t_artifact "$T_ROOT/a-scope" macos 8.5.13-ck1
+t_set "a recorded 8.5-only publish scope is laid out" "" --scope '8.5' 'linux macos' \
+  "$T_ROOT/a-scope" "$T_ROOT/set-scope"
+t_set "the scoped set passes --check" "" --scope '8.5' 'linux macos' --check "$T_ROOT/set-scope"
+[ "$(find "$T_ROOT/set-scope" -type f | wc -l)" -eq 5 ] ||
+  t_fail "the scoped set does not hold five files"
+t_ok "the scoped set holds only 8.5's two platforms, descriptors and SHA256SUMS"
+t_set "a scope refuses an extra publishable line" "not an expected release in the clean 8.5 on linux macos plan" \
+  --scope '8.5' 'linux macos' --check "$T_ROOT/set"
+t_set "a scope requires every line it names" "has no php-8.2.36-ck1 release folder" \
+  --scope '8.2 8.5' 'linux macos' --check "$T_ROOT/set-scope"
+t_set "a clean scope refuses a CI-only line" "clean build cannot include a CI-only PHP line" \
+  --scope '7.4' 'linux macos' --check "$T_ROOT/set-scope"
+
+t_release_artifacts "$T_ROOT/a-ci-only"
+t_artifact "$T_ROOT/a-ci-only" linux 7.4.33-ck1
+t_artifact "$T_ROOT/a-ci-only" macos 7.4.33-ck1
+t_set "a CI-only line is refused in a publish set" "not an expected release in the release plan" \
+  "$T_ROOT/a-ci-only" "$T_ROOT/set-ci-only"
+t_set "--allow-partial accepts the same smoke artifacts" "" --allow-partial \
+  "$T_ROOT/a-ci-only" "$T_ROOT/set-smoke"
+
+t_artifact "$T_ROOT/a-linux" linux 8.5.13-ck1
 t_set "a version without its macOS archive is refused" "has no macos-aarch64 archive" \
   "$T_ROOT/a-linux" "$T_ROOT/set-linux"
 t_set "--allow-partial accepts it for a test build" "" --allow-partial \
   "$T_ROOT/a-linux" "$T_ROOT/set-partial"
 
-t_artifacts "$T_ROOT/a-extra"
+t_release_artifacts "$T_ROOT/a-extra"
 printf 'x\n' >"$T_ROOT/a-extra/notes.txt"
 t_set "an extra file in an artifact is refused" "is neither an archive nor a descriptor" \
   "$T_ROOT/a-extra" "$T_ROOT/set-extra"
 
-t_artifacts "$T_ROOT/a-wrong"
-printf 'changed\n' >>"$T_ROOT/a-wrong/php-8.5.12-ck1-macos-aarch64.tar.gz"
+t_release_artifacts "$T_ROOT/a-wrong"
+printf 'changed\n' >>"$T_ROOT/a-wrong/php-8.5.13-ck1-macos-aarch64.tar.gz"
 t_set "an archive that differs from its descriptor is refused" "does not describe" \
   "$T_ROOT/a-wrong" "$T_ROOT/set-wrong"
 
-t_artifacts "$T_ROOT/a-alone"
-rm "$T_ROOT/a-alone/php-7.4.33-ck1-linux-x86_64.json"
+t_release_artifacts "$T_ROOT/a-alone"
+rm "$T_ROOT/a-alone/php-8.5.13-ck1-linux-x86_64.json"
 t_set "an archive without its descriptor is refused" "has no descriptor" \
   "$T_ROOT/a-alone" "$T_ROOT/set-alone"
 
-t_artifacts "$T_ROOT/a-other"
-jq '.version = "7.4.33-ck2"' "$T_ROOT/a-other/php-7.4.33-ck1-macos-aarch64.json" >"$T_ROOT/other.json"
-mv "$T_ROOT/other.json" "$T_ROOT/a-other/php-7.4.33-ck1-macos-aarch64.json"
+t_release_artifacts "$T_ROOT/a-other"
+jq '.version = "8.5.13-ck2"' "$T_ROOT/a-other/php-8.5.13-ck1-macos-aarch64.json" >"$T_ROOT/other.json"
+mv "$T_ROOT/other.json" "$T_ROOT/a-other/php-8.5.13-ck1-macos-aarch64.json"
 t_set "a descriptor for another version is refused" "does not describe" \
   "$T_ROOT/a-other" "$T_ROOT/set-other"
 
 cp -R "$T_ROOT/set" "$T_ROOT/set-crlf"
-sed 's/$/\r/' "$T_ROOT/set/php-7.4.33-ck1/SHA256SUMS" >"$T_ROOT/set-crlf/php-7.4.33-ck1/SHA256SUMS"
+sed 's/$/\r/' "$T_ROOT/set/php-8.5.13-ck1/SHA256SUMS" >"$T_ROOT/set-crlf/php-8.5.13-ck1/SHA256SUMS"
 t_set "--check refuses SHA256SUMS with CRLF line ends" "SHA256SUMS is not exactly" \
   --check "$T_ROOT/set-crlf"
 
 cp -R "$T_ROOT/set" "$T_ROOT/set-stray"
-printf 'x\n' >"$T_ROOT/set-stray/php-8.5.12-ck1/.hidden"
+printf 'x\n' >"$T_ROOT/set-stray/php-8.5.13-ck1/.hidden"
 t_set "--check refuses a stray file" "holds 6 entries, expected 5" --check "$T_ROOT/set-stray"
 
 # A draft's REST tag can differ from the tag that will be created on publish.
@@ -194,7 +235,7 @@ gh() {
   shift
   case "$endpoint" in
     "$repo/releases")
-      [ "$*" = "--method POST -F draft=true -f make_latest=false -f tag_name=$T_TAG -f target_commitish=$T_SHA -f name=PHP 8.5.12-ck1 -F body=@$RUNNER_TEMP/notes-$T_TAG.md" ] ||
+      [ "$*" = "--method POST -F draft=true -f make_latest=false -f tag_name=$T_TAG -f target_commitish=$T_SHA -f name=PHP 8.5.13-ck1 -F body=@$RUNNER_TEMP/notes-$T_TAG.md" ] ||
         return 1
       jq -n --arg target "$T_SHA" --rawfile body "$RUNNER_TEMP/notes-$T_TAG.md" \
         '{id: 42, tag_name: "untagged-d4b97137932eb183d68d", draft: true, target_commitish: $target, body: $body}' |
@@ -241,14 +282,14 @@ gh() {
   esac
 }
 export -f gh
-export T_ROOT T_SHA T_TAG=php-8.5.12-ck1
+export T_ROOT T_SHA T_TAG=php-8.5.13-ck1
 export RUNNER_TEMP="$T_ROOT/runner"
 export GITHUB_REPOSITORY=ckm-php/ckm-dev GITHUB_REF=refs/heads/main GITHUB_SHA="$T_SHA"
 export GITHUB_SERVER_URL=https://github.com GITHUB_RUN_ID=46028817425 GITHUB_RUN_ATTEMPT=1
 export TAGS="$T_TAG" RUN_ID="$T_RUN" COMMIT="$T_SHA" ATTESTATION_URL=https://github.com/example
 mkdir "$RUNNER_TEMP"
 mkdir "$RUNNER_TEMP/release-set"
-cp -R "$T_ROOT/set/$T_TAG" "$RUNNER_TEMP/release-set/"
+cp -R "$T_ROOT/set-scope/$T_TAG" "$RUNNER_TEMP/release-set/"
 : >"$T_ROOT/assets.jsonl"
 printf '[]\n' >"$T_ROOT/releases.json"
 printf '[]\n' >"$T_ROOT/refs.json"
@@ -259,7 +300,7 @@ t_draft() {
 }
 
 t_draft preflight || t_fail "no existing tag or release"
-printf '%s\n' '[{"tag_name":"untagged-d4b97137932eb183d68d","draft":true,"name":"PHP 8.5.12-ck1"}]' \
+printf '%s\n' '[{"tag_name":"untagged-d4b97137932eb183d68d","draft":true,"name":"PHP 8.5.13-ck1"}]' \
   >"$T_ROOT/releases.json"
 if t_draft preflight; then t_fail "a leftover untagged draft was missed"; fi
 grep -q "a release or draft for $T_TAG already exists" "$T_ROOT/stderr" ||

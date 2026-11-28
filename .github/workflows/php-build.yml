@@ -5,8 +5,9 @@
 # Caches: pushes, pull requests and ordinary dispatches are test runs and may
 # restore the library stack and the Rust build cache. Only a dispatch with
 # `clean` set can feed publishing (D25): it restores and saves no cache in any
-# job, records `clean: true` in its `build-info` artifact, and php-publish.yml
-# refuses every run whose `build-info` does not say so.
+# job, records `clean: true` and its exact line/OS scope in its `build-info`
+# artifact, and php-publish.yml refuses every run whose `build-info` does not
+# say so.
 name: PHP build
 
 on:
@@ -30,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       lines:
-        description: PHP lines, separated by spaces (7.4, 8.5)
+        description: PHP lines from catalog/php-lines.json, separated by spaces
         type: string
         default: '8.5'
       oses:
@@ -38,7 +39,7 @@ on:
         type: string
         default: linux
       clean:
-        description: Clean candidate for publishing (no caches; needs both OSes)
+        description: Clean candidate for publishing (no caches; requires the full eligible platform set)
         type: boolean
         default: false
 
@@ -60,12 +61,15 @@ defaults:
 jobs:
   plan:
     name: Plan the matrix
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       tool: ${{ steps.matrix.outputs.tool }}
       deps: ${{ steps.matrix.outputs.deps }}
       php: ${{ steps.matrix.outputs.php }}
+      lines: ${{ steps.matrix.outputs.lines }}
+      oses: ${{ steps.matrix.outputs.oses }}
+      publishable: ${{ steps.matrix.outputs.publishable }}
       complete: ${{ steps.matrix.outputs.complete }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,88 +83,23 @@ jobs:
           INPUT_LINES: ${{ inputs.lines }}
           INPUT_OSES: ${{ inputs.oses }}
           INPUT_CLEAN: ${{ inputs.clean }}
-          # What a push to main or a pull request builds.
-          PR_LINES: '7.4 8.5'
-          PR_OSES: linux macos
         run: |
+          args=("$EVENT")
           if [ "$EVENT" = workflow_dispatch ]; then
-            lines=$INPUT_LINES
-            oses=$INPUT_OSES
-          else
-            lines=$PR_LINES
-            oses=$PR_OSES
+            args+=("$INPUT_LINES" "$INPUT_OSES" "$INPUT_CLEAN")
           fi
-          # Inputs are untrusted text: no globbing, and only known values pass.
-          set -f
-          for token in $lines; do
-            case "$token" in
-              7.4 | 8.5) ;;
-              *) echo "::error::unknown PHP line in 'lines' (allowed: 7.4, 8.5)"; exit 1 ;;
-            esac
-          done
-          for token in $oses; do
-            case "$token" in
-              linux | macos) ;;
-              *) echo "::error::unknown OS in 'oses' (allowed: linux, macos)"; exit 1 ;;
-            esac
-          done
-          # Canonical order, no duplicates.
-          sel_lines=
-          for known in 7.4 8.5; do
-            for token in $lines; do
-              if [ "$token" = "$known" ]; then sel_lines="$sel_lines $known"; break; fi
-            done
-          done
-          sel_oses=
-          for known in linux macos; do
-            for token in $oses; do
-              if [ "$token" = "$known" ]; then sel_oses="$sel_oses $known"; break; fi
-            done
-          done
-          sel_lines=${sel_lines# }
-          sel_oses=${sel_oses# }
-          if [ -z "$sel_lines" ] || [ -z "$sel_oses" ]; then
-            echo "::error::choose at least one PHP line and one OS"
-            exit 1
-          fi
-          echo "lines: $sel_lines; oses: $sel_oses"
-          # A release needs every version on both OSes.
-          complete=false
-          if [ "$sel_oses" = 'linux macos' ]; then complete=true; fi
-          if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_CLEAN" = true ] && [ "$complete" != true ]; then
-            echo "::error::a clean build needs both OSes (oses: linux macos)"
-            exit 1
-          fi
-
-          # Each line's stack comes from the manifest. ck-release is always
-          # built for Linux, since the payload job runs there.
-          matrix=$(jq -c --arg lines "$sel_lines" --arg oses "$sel_oses" '
-            {"linux": "ubuntu-22.04", "macos": "macos-15"} as $runners
-            | ($lines | split(" ")) as $want_lines
-            | ($oses | split(" ")) as $want_oses
-            | [.lines[] | select(.line as $l | $want_lines | index($l)) | {line, stack}] as $sel
-            | if ($sel | length) != ($want_lines | length)
-              then error("a requested line is not in catalog/php-lines.json") else . end
-            | {
-                tool: {include: [($want_oses + ["linux"] | unique)[] | {os: ., runner: $runners[.]}]},
-                deps: {include: [$want_oses[] as $os | ($sel | map(.stack) | unique)[]
-                  | {os: $os, runner: $runners[$os], stack: .}]},
-                php: {include: [$want_oses[] as $os | $sel[]
-                  | {os: $os, runner: $runners[$os], line, stack}]}
-              }' catalog/php-lines.json)
-          echo "$matrix" | jq .
-          {
-            echo "tool=$(echo "$matrix" | jq -c .tool)"
-            echo "deps=$(echo "$matrix" | jq -c .deps)"
-            echo "php=$(echo "$matrix" | jq -c .php)"
-            echo "complete=$complete"
-          } >>"$GITHUB_OUTPUT"
+          matrix=$(bash build/php/plan-matrix.sh "${args[@]}")
+          jq . <<<"$matrix"
+          jq -r 'to_entries[] | "\(.key)=\(.value | tojson)"' <<<"$matrix" >>"$GITHUB_OUTPUT"
 
       # What php-publish.yml checks before it publishes this run's archives.
       - name: Write the build info
         env:
           EVENT: ${{ github.event_name }}
           INPUT_CLEAN: ${{ inputs.clean }}
+          INPUT_LINES: ${{ steps.matrix.outputs.lines }}
+          INPUT_OSES: ${{ steps.matrix.outputs.oses }}
+          INPUT_PUBLISHABLE: ${{ steps.matrix.outputs.publishable }}
         run: |
           clean=false
           if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_CLEAN" = true ]; then clean=true; fi
@@ -173,8 +112,12 @@ jobs:
             --arg event "$EVENT" \
             --arg ref "$GITHUB_REF" \
             --argjson clean "$clean" \
+            --argjson lines "$INPUT_LINES" \
+            --argjson oses "$INPUT_OSES" \
+            --argjson publishable "$INPUT_PUBLISHABLE" \
             '{commit: $commit, run_id: $run_id, run_attempt: $run_attempt, workflow: $workflow,
-              event: $event, ref: $ref, clean: $clean}' >"$RUNNER_TEMP/build-info/build-info.json"
+              event: $event, ref: $ref, clean: $clean, lines: $lines, oses: $oses,
+              publishable: $publishable}' >"$RUNNER_TEMP/build-info/build-info.json"
           cat "$RUNNER_TEMP/build-info/build-info.json"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -186,7 +129,7 @@ jobs:
 
   lint:
     name: Lint the build scripts
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -222,13 +165,16 @@ jobs:
       - name: Fetch self-test
         run: bash build/php/tests/fetch-selftest.sh
 
-      # T5: the audit's string rules.
+      # T5: the audit's string rules and Linux glibc boundary.
       - name: Audit self-test
         run: bash build/php/tests/audit-selftest.sh
 
       # T6: the publish gate's run check and release-set layout.
       - name: Release-check self-test
         run: bash build/php/tests/release-check-selftest.sh
+
+      - name: Matrix planner self-test
+        run: bash build/php/tests/plan-matrix-selftest.sh
 
   tool:
     name: ck-release (${{ matrix.os }})
@@ -342,6 +288,8 @@ jobs:
       MATRIX_OS: ${{ matrix.os }}
       MATRIX_LINE: ${{ matrix.line }}
       MATRIX_STACK: ${{ matrix.stack }}
+      MATRIX_ARCH: ${{ matrix.arch }}
+      MATRIX_VERSION: ${{ matrix.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -390,6 +338,15 @@ jobs:
             echo "::error::expected one archive and one descriptor in /opt/ck-dev-build/out"
             exit 1
           fi
+          stem="php-$MATRIX_VERSION-$MATRIX_OS-$MATRIX_ARCH"
+          if [ "${archives[0]##*/}" != "$stem.tar.gz" ] || [ "${descriptors[0]##*/}" != "$stem.json" ]; then
+            echo "::error::expected archive and descriptor for $stem"
+            exit 1
+          fi
+          jq -e --arg version "$MATRIX_VERSION" --arg os "$MATRIX_OS" --arg arch "$MATRIX_ARCH" \
+            --arg file "$stem.tar.gz" \
+            '.name == "php" and .version == $version and .os == $os and .cpu == $arch and .file == $file' \
+            "${descriptors[0]}" >/dev/null
           echo "OUT_ARCHIVE=${archives[0]}" >>"$GITHUB_ENV"
           echo "OUT_DESCRIPTOR=${descriptors[0]}" >>"$GITHUB_ENV"
           cat "${descriptors[0]}"
@@ -512,15 +469,17 @@ jobs:
         run: /bin/bash build/php/build.sh bare-root "$CK_PHP_ARCHIVE"
 
   # The release set (one folder per version, as php-publish.yml uploads it)
-  # and the payload it would sign to. A test build of one OS lays out a
-  # partial set; a clean build is refused at the plan unless it has both.
+  # and the payload it would sign to. A clean build replays its recorded scope;
+  # a test build of one OS lays out a partial set, including CI-only lines.
   payload:
     name: Release set and unsigned catalog payload
     needs: [plan, tool, contract]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      COMPLETE: ${{ needs.plan.outputs.complete }}
+      PLAN_LINES: ${{ needs.plan.outputs.lines }}
+      PLAN_OSES: ${{ needs.plan.outputs.oses }}
+      PUBLISHABLE: ${{ needs.plan.outputs.publishable }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -547,9 +506,17 @@ jobs:
 
       - name: Lay out the release set
         run: |
-          partial=()
-          if [ "$COMPLETE" != true ]; then partial=(--allow-partial); fi
-          bash build/php/release-set.sh ${partial[@]+"${partial[@]}"} \
+          scope=()
+          if [ "$PUBLISHABLE" = true ]; then
+            # The plan outputs are JSON arrays; the planner's dispatch filter
+            # takes whitespace-delimited tokens.
+            scope_lines=$(jq -rn --argjson value "$PLAN_LINES" '$value | join(" ")')
+            scope_oses=$(jq -rn --argjson value "$PLAN_OSES" '$value | join(" ")')
+            scope=(--scope "$scope_lines" "$scope_oses")
+          else
+            scope=(--allow-partial)
+          fi
+          bash build/php/release-set.sh "${scope[@]}" \
             "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/release-set"
           (cd "$RUNNER_TEMP/release-set" && find . -type f | sort && cat ./*/SHA256SUMS)
 

@@ -7,7 +7,7 @@ use std::path::Path;
 use ck_core::catalog::schema::Platform;
 
 use crate::payload::{self, measure};
-use crate::{Error, Result, asset_file_name};
+use crate::{Error, Result, asset_file_name, check_archive_format};
 
 /// Checks every artifact in the payload file `payload` (read with
 /// [`payload::read`]) against `<releases>/<name>-<version>/<file>`, the
@@ -15,8 +15,9 @@ use crate::{Error, Result, asset_file_name};
 /// size and SHA256. Returns how many artifacts matched.
 ///
 /// `<file>` is the last segment of the artifact's URL, which must be the
-/// archive name `payload build` gives it ([`asset_file_name`]), so a URL can
-/// never point the check outside its release folder.
+/// archive name `payload build` gives it ([`asset_file_name`]) for the
+/// artifact's platform and format. A URL can never point the check outside
+/// its release folder.
 pub fn verify(payload: &Path, releases: &Path) -> Result<usize> {
     let (_, payload) = payload::read(payload)?;
     let mut count = 0;
@@ -28,6 +29,8 @@ pub fn verify(payload: &Path, releases: &Path) -> Result<usize> {
                 arch: artifact.arch,
             };
             let what = format!("{} {} for {platform}", runtime.name, runtime.version);
+            check_archive_format(platform, artifact.format)
+                .map_err(|reason| Error::Invalid(format!("{what}: {reason}")))?;
             let file = asset_file_name(&runtime.name, &runtime.version, platform);
             if artifact.url.rsplit('/').next() != Some(file.as_str()) {
                 return Err(Error::Invalid(format!(
@@ -73,7 +76,7 @@ mod tests {
         let built = payload::build(&releases, &spec(PREFIX), &release()).unwrap();
         let path = temp.0.join("payload-v1.json");
         payload::write(&built, &path).unwrap();
-        assert_eq!(verify(&path, &releases).unwrap(), 3);
+        assert_eq!(verify(&path, &releases).unwrap(), 4);
 
         let archive = releases
             .join("php-8.5.12-ck1")

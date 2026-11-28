@@ -46,7 +46,7 @@ The keys are pinned by a person, never by a script or CI:
 
 The owner reviews these files in the diff, like the lock.
 
-Pinned on 2026-11-19. Each `.fingerprints` file repeats its sources.
+Pinned on 2026-11-19. PHP's allow-list was extended on 2026-11-28 with the 8.2, 8.3 and 8.4 signers and re-cross-checked against the existing 8.5 signer. Each `.fingerprints` file repeats its sources.
 
 | Component   | Key source (file as downloaded)                                                                                                           | Second source for the fingerprints                                                                                                                                                  |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -45,6 +45,8 @@ jobs:
       actions: read
     outputs:
       tags: ${{ steps.set.outputs.tags }}
+      lines: ${{ steps.scope.outputs.lines }}
+      oses: ${{ steps.scope.outputs.oses }}
     env:
       RUN_ID: ${{ inputs.run_id }}
       COMMIT: ${{ inputs.commit }}
@@ -95,6 +97,17 @@ jobs:
           EXPECTED_WORKFLOW_PATH: .github/workflows/php-build.yml
         run: bash build/php/release-check.sh
 
+      # The clean run records the exact scope it built. Replay it through the
+      # same planner the build used before checking any of its files.
+      - name: Check the candidate's scope
+        id: scope
+        run: |
+          info=$RUNNER_TEMP/build-info/build-info.json
+          lines=$(jq -er '.lines | join(" ")' "$info")
+          oses=$(jq -er '.oses | join(" ")' "$info")
+          bash build/php/plan-matrix.sh workflow_dispatch "$lines" "$oses" true >/dev/null
+          printf 'lines=%s\notes=%s\n' "$lines" "$oses" >>"$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-set
@@ -111,15 +124,18 @@ jobs:
       - name: Build ck-release
         run: cargo build -p ck-release --release --locked
 
-      # Both platforms per version and nothing else; each archive equals its
-      # descriptor and SHA256SUMS (checked twice, by the script and by
-      # ck-release); each version is the manifest's.
+      # The recorded scope, every eligible platform per version and nothing
+      # else; each archive equals its descriptor and SHA256SUMS (checked twice,
+      # by the script and by ck-release); each version is the manifest's.
       - name: Check the release set
         id: set
+        env:
+          SCOPE_LINES: ${{ steps.scope.outputs.lines }}
+          SCOPE_OSES: ${{ steps.scope.outputs.oses }}
         run: |
           set_dir=$RUNNER_TEMP/release-set
           ck=target/release/ck-release
-          bash build/php/release-set.sh --check "$set_dir"
+          bash build/php/release-set.sh --scope "$SCOPE_LINES" "$SCOPE_OSES" --check "$set_dir"
           "$ck" lock check
           expires=$(date -u -d '+90 days' +%Y-%m-%dT%H:%M:%SZ)
           "$ck" payload build --releases "$set_dir" --sequence 1 --expires "$expires" \
@@ -175,12 +191,15 @@ jobs:
       - name: Summary
         env:
           TAGS: ${{ steps.set.outputs.tags }}
+          SCOPE_LINES: ${{ steps.scope.outputs.lines }}
+          SCOPE_OSES: ${{ steps.scope.outputs.oses }}
         run: |
           {
             echo "## Candidate"
             echo
             echo "- Build run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
             echo "- Commit: \`$COMMIT\`"
+            echo "- Scope: lines \`$SCOPE_LINES\`, OSes \`$SCOPE_OSES\`"
             echo "- Tags: $TAGS"
             echo
             echo "| Tag | File | Size | SHA256 |"
@@ -218,6 +237,8 @@ jobs:
       RUN_ID: ${{ inputs.run_id }}
       COMMIT: ${{ inputs.commit }}
       TAGS: ${{ needs.prepare.outputs.tags }}
+      SCOPE_LINES: ${{ needs.prepare.outputs.lines }}
+      SCOPE_OSES: ${{ needs.prepare.outputs.oses }}
     steps:
       # Fail closed: RELEASE_GATE is set only inside the protected `release`
       # environment. If that environment is missing (a job that names one
@@ -262,7 +283,7 @@ jobs:
             echo "::error::the release set does not hold the tags prepare checked ($TAGS)"
             exit 1
           fi
-          bash build/php/release-set.sh --check "$set_dir"
+          bash build/php/release-set.sh --scope "$SCOPE_LINES" "$SCOPE_OSES" --check "$set_dir"
           for tag in $TAGS; do
             (cd "$set_dir/$tag" && sha256sum --check --strict SHA256SUMS)
           done

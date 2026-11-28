@@ -1,13 +1,23 @@
 # Fingerprint allow-list for php: see README.md in this folder.
 #
-# The release managers of every line in catalog/php-lines.json. Keyring:
+# The release managers who signed the pinned archives of every line in
+# catalog/php-lines.json. Keyring:
 # https://www.php.net/distributions/php-keyring.gpg. Cross-checked on
-# 2026-11-19 against https://www.php.net/gpg-keys.php (sections "PHP 7.4" and
-# "PHP 8.5"). 7.4's second manager, Peter Kokot (4267 0A7F E4D0 441C 8E46
-# 3234 9E4F DC07 4A4E F02D), is not in the keyring and is not listed.
+# 2026-11-28 against https://www.php.net/gpg-keys.php (sections "PHP 7.4",
+# "PHP 8.2", "PHP 8.3", "PHP 8.4" and "PHP 8.5"). Other managers of each
+# line are deliberately not in this smaller allow-list.
 
 # PHP 7.4
 5A52 8807 81F7 5560 8BF8  15FC 910D EB46 F53E A312  # Derick Rethans (signed 7.4.33)
+
+# PHP 8.2
+1198 C011 7593 497A 5EC5  C199 286A F1F9 8974 69DC  # Pierrick Charron (signed 8.2.36)
+
+# PHP 8.3
+C28D 9375 7560 3EB4 ABB7  2586 1C07 79DC 5C0A 9DE4  # Jakub Zelenka (signed 8.3.37)
+
+# PHP 8.4
+0616 E93D 95AF 4712 43E2  6761 7704 26E1 7EBB B3DD  # Saki Takamachi (signed 8.4.28)
 
 # PHP 8.5
 1198 C011 7593 497A 5EC5  C199 286A F1F9 8974 69DC  # Pierrick Charron
