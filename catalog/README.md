@@ -82,6 +82,22 @@ The decoded payload (schema 1):
 - **`url`:** starts at `https://github.com/`. GitHub's redirects to `release-assets.githubusercontent.com` or `objects.githubusercontent.com` are followed, at most 5. `payload build` writes each URL as `https://github.com/ckm-php/ckm-dev/releases/download/<name>-<version>/<file>`, and `sign` refuses any other.
 - **Archives:** unpacked as they are into `runtimes/<name>/<version>/`, with no strip-components. They hold only files, folders and relative symlinks that stay inside the archive. Windows archives hold no links at all.
 
+## Release conductor (short path)
+
+From a clean checkout of `main`, the normal release command is:
+
+```bash
+catalog/release.sh auto
+```
+
+It checks CI, runs the probe and the clean build, verifies the candidate, dispatches `PHP publish`, and stops at each human gate. Run the **same command** again after you approve `release` in GitHub, after offline sign/upload, and after the final catalog check. `catalog/release.sh next` prints the current phase and exact next action.
+
+The conductor does **not** approve the release environment, touch a private key, sign, upload, commit, push or test from the app. Those stay owner-only. It keeps run ids, scope and hashes outside the repo in `~/ck-release-work/release-state.json`, and refuses a changed `main` head or a stale candidate.
+
+Escape hatches are `catalog/release.sh prepare [commit]`, `publish`, `catalog-prepare` and `catalog-run`. The detailed runbook below remains the source of truth and the fallback when a phase needs manual recovery.
+
+> Do not commit `catalog/release.sh` while a clean candidate is frozen. Wait until publish finishes.
+
 ## Publishing and signing: the owner's runbook
 
 **Ground rules:**
