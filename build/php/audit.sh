@@ -41,7 +41,7 @@ CK_AUDIT_SH_LOADED=1
 
 # The Linux baseline: the ubuntu-24.04 runner.
 readonly CK_AUDIT_GLIBC_MAX=2.39
-readonly CK_AUDIT_GLIBCXX_MAX=3.4.30
+readonly CK_AUDIT_GLIBCXX_MAX=3.4.32
 # The macOS baseline.
 readonly CK_AUDIT_MACOS_MIN=12.0
 
@@ -51,11 +51,13 @@ readonly CK_AUDIT_LINUX_SYSTEM="libc.so.6 libm.so.6 libpthread.so.0 libdl.so.2
 librt.so.1 libresolv.so.2 libutil.so.1 ld-linux-x86-64.so.2 libstdc++.so.6
 libgcc_s.so.1"
 
-# System libraries and frameworks an archive may link on macOS.
+# System libraries and frameworks an archive may link on macOS. Xcode 16.4
+# links libnetwork.dylib into PHP's resolver; it ships from macOS 10.15 on.
 readonly CK_AUDIT_MACOS_SYSTEM="/usr/lib/libSystem.B.dylib
 /usr/lib/libc++.1.dylib
 /usr/lib/libiconv.2.dylib
 /usr/lib/libresolv.9.dylib
+/usr/lib/libnetwork.dylib
 /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
 /System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices
 /System/Library/Frameworks/Security.framework/Versions/A/Security

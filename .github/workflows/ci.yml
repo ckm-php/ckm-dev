@@ -18,6 +18,52 @@ defaults:
     shell: bash
 
 jobs:
+  php-lint:
+    name: PHP build scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The full PHP matrix is manual-only (PHP build); this keeps the cheap
+      # script checks on every push and pull request.
+      - name: Install shellcheck
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version
+
+      - name: shellcheck and bash -n
+        run: |
+          mapfile -d '' files < <(find build/php -type f -name '*.sh' -print0 | sort -z)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no build scripts found"
+            exit 1
+          fi
+          status=0
+          for file in "${files[@]}"; do
+            echo "checking $file"
+            bash -n "$file" || status=1
+            (cd "$(dirname "$file")" && shellcheck -x -P SCRIPTDIR "$(basename "$file")") || status=1
+          done
+          exit "$status"
+
+      - name: Fetch self-test
+        run: bash build/php/tests/fetch-selftest.sh
+
+      - name: Audit self-test
+        run: bash build/php/tests/audit-selftest.sh
+
+      - name: Release-check self-test
+        run: bash build/php/tests/release-check-selftest.sh
+
+      - name: Matrix planner self-test
+        run: bash build/php/tests/plan-matrix-selftest.sh
+
   gate:
     name: Gate (${{ matrix.os }})
     strategy:

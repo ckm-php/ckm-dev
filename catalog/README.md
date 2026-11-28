@@ -23,7 +23,7 @@ No catalog is published yet. The owner's two public keys are compiled into `RELE
 - Check both: `cargo run -p ck-release -- lock check`.
 - A PHP patch refresh replaces the previous source pin for the same minor line.
 - The build hosts are for the build and the pin refresh only. The app's downloader still allows only `github.com` and GitHub's asset hosts.
-- A commit that changes only `payload-v1.json` and `catalog-v1.json` does not rebuild PHP: the PHP build's path filter names only the lock and `php-lines.json` in this folder.
+- A commit that changes `payload-v1.json` or `catalog-v1.json` does not rebuild PHP: full PHP builds are manual dispatches, and CI only lints the build scripts.
 
 ## Format
 
@@ -228,11 +228,11 @@ openssl pkey -in ~/.ck-dev-keys/ck-catalog-key-a.pem | ./target/debug/ck-release
 - Note each key's `key_id`: every envelope names the key that signed it by this id.
 - Do the same for key B, from its cloud copy (`openssl pkey -in <path of the cloud copy>`).
 
-**G. Push once.** Only after F passed for both keys. Pushing starts CI and the PHP build. Nothing publishes by itself.
+**G. Push once.** Only after F passed for both keys. Pushing starts CI only; the full PHP build is a manual dispatch. Nothing publishes by itself.
 
 ### After the push
 
-**1. Wait for green.** CI and the PHP build of the pushed commit must pass (`gh run list -R ckm-php/ckm-dev -L 10`). If anything is red, fix it first; nothing below runs on a red commit.
+**1. Wait for CI green.** CI of the pushed commit must pass (`gh run list -R ckm-php/ckm-dev -L 10`). CI includes the cheap PHP script lint and self-tests. If anything is red, fix it first; nothing below runs on a red commit.
 
 **2. Probe.** This is the first real TLS handshake on each OS, the first GitHub redirect, and the strict URL parser on GitHub's real `Location`.
 
@@ -242,12 +242,13 @@ gh workflow run "Catalog check" -R ckm-php/ckm-dev -f mode=probe
 
 - It must pass on Linux, macOS and Windows.
 - `probe` works only while `transport-probe.txt` is on the `catalog-v1` release (until step 7).
-- The weekly run of the same workflow starts with the push. It stays red until the first catalog is uploaded; that is expected.
+- The weekly run of the same workflow is independent of this push. It stays red until the first catalog is uploaded; that is expected.
 
 **3. Clean candidate.** Pass all three inputs:
 
 ```bash
-gh workflow run "PHP build" -R ckm-php/ckm-dev -f clean=true -f lines='8.5' -f oses='linux macos'
+gh workflow run "PHP build" -R ckm-php/ckm-dev --ref main \
+  -f clean=true -f lines='8.5' -f oses='linux macos'
 gh run list -R ckm-php/ckm-dev --workflow php-build.yml --event workflow_dispatch -L 3 \
   --json databaseId,headSha,status,conclusion
 ```

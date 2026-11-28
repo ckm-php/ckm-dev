@@ -2,32 +2,16 @@
 # nothing: the archives, their descriptors, the release set and an unsigned
 # catalog payload are run artifacts only.
 #
-# Caches: pushes, pull requests and ordinary dispatches are test runs and may
-# restore the library stack and the Rust build cache. Only a dispatch with
-# `clean` set can feed publishing (D25): it restores and saves no cache in any
-# job, records `clean: true` and its exact line/OS scope in its `build-info`
-# artifact, and php-publish.yml refuses every run whose `build-info` does not
-# say so.
+# This workflow is manual-only. A full PHP matrix is too expensive to run on
+# every push; CI runs the cheap shell lint and self-tests instead. Ordinary
+# dispatches are test runs and may restore the library stack and the Rust build
+# cache. Only a dispatch with `clean` set can feed publishing (D25): it restores
+# and saves no cache in any job, records `clean: true` and its exact line/OS
+# scope in its `build-info` artifact, and php-publish.yml refuses every run
+# whose `build-info` does not say so.
 name: PHP build
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - build/**
-      - catalog/sources.lock.json
-      - catalog/php-lines.json
-      - crates/ck-release/**
-      - crates/ck-net/tests/php_archive.rs
-      - .github/workflows/php-build.yml
-  pull_request:
-    paths:
-      - build/**
-      - catalog/sources.lock.json
-      - catalog/php-lines.json
-      - crates/ck-release/**
-      - crates/ck-net/tests/php_archive.rs
-      - .github/workflows/php-build.yml
   workflow_dispatch:
     inputs:
       lines:
@@ -46,12 +30,11 @@ on:
 permissions:
   contents: read
 
-# A newer run of the same event on the same branch replaces the older one.
-# A clean dispatch gets a group of its own (its run id) and is never
-# cancelled, so a later push or test dispatch cannot cut a publish candidate
-# short. `inputs.clean` is empty outside a dispatch.
+# A newer test dispatch on the same ref replaces the older one. A clean
+# dispatch gets a group of its own (its run id) and is never cancelled, so a
+# later test dispatch cannot cut a publish candidate short.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{ inputs.clean && github.run_id || 'shared' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.clean && github.run_id || 'shared' }}
   cancel-in-progress: ${{ !inputs.clean }}
 
 defaults:
@@ -79,39 +62,31 @@ jobs:
       - name: Compute the matrix
         id: matrix
         env:
-          EVENT: ${{ github.event_name }}
           INPUT_LINES: ${{ inputs.lines }}
           INPUT_OSES: ${{ inputs.oses }}
           INPUT_CLEAN: ${{ inputs.clean }}
         run: |
-          args=("$EVENT")
-          if [ "$EVENT" = workflow_dispatch ]; then
-            args+=("$INPUT_LINES" "$INPUT_OSES" "$INPUT_CLEAN")
-          fi
-          matrix=$(bash build/php/plan-matrix.sh "${args[@]}")
+          matrix=$(bash build/php/plan-matrix.sh workflow_dispatch "$INPUT_LINES" "$INPUT_OSES" "$INPUT_CLEAN")
           jq . <<<"$matrix"
           jq -r 'to_entries[] | "\(.key)=\(.value | tojson)"' <<<"$matrix" >>"$GITHUB_OUTPUT"
 
       # What php-publish.yml checks before it publishes this run's archives.
       - name: Write the build info
         env:
-          EVENT: ${{ github.event_name }}
           INPUT_CLEAN: ${{ inputs.clean }}
           INPUT_LINES: ${{ steps.matrix.outputs.lines }}
           INPUT_OSES: ${{ steps.matrix.outputs.oses }}
           INPUT_PUBLISHABLE: ${{ steps.matrix.outputs.publishable }}
         run: |
-          clean=false
-          if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_CLEAN" = true ]; then clean=true; fi
           mkdir -p "$RUNNER_TEMP/build-info"
           jq -n \
             --arg commit "$GITHUB_SHA" \
             --argjson run_id "$GITHUB_RUN_ID" \
             --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
             --arg workflow .github/workflows/php-build.yml \
-            --arg event "$EVENT" \
+            --arg event workflow_dispatch \
             --arg ref "$GITHUB_REF" \
-            --argjson clean "$clean" \
+            --argjson clean "$INPUT_CLEAN" \
             --argjson lines "$INPUT_LINES" \
             --argjson oses "$INPUT_OSES" \
             --argjson publishable "$INPUT_PUBLISHABLE" \
@@ -165,7 +140,8 @@ jobs:
       - name: Fetch self-test
         run: bash build/php/tests/fetch-selftest.sh
 
-      # T5: the audit's string rules and Linux glibc boundary.
+      # T5: the audit's string rules, glibc/libstdc++ baselines and macOS
+      # system library allow-list.
       - name: Audit self-test
         run: bash build/php/tests/audit-selftest.sh
 
