@@ -106,7 +106,10 @@ jobs:
           lines=$(jq -er '.lines | join(" ")' "$info")
           oses=$(jq -er '.oses | join(" ")' "$info")
           bash build/php/plan-matrix.sh workflow_dispatch "$lines" "$oses" true >/dev/null
-          printf 'lines=%s\notes=%s\n' "$lines" "$oses" >>"$GITHUB_OUTPUT"
+          {
+            echo "lines=$lines"
+            echo "oses=$oses"
+          } >>"$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
